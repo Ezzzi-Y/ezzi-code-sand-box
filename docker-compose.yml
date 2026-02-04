@@ -1,0 +1,79 @@
+services:
+  # ==================== 沙箱服务 ====================
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    container_name: code-sandbox
+    # 核心：让容器内的 Java 进程以 root 身份运行
+    # 这样它才有权访问挂载进来的 /var/run/docker.sock
+    user: root
+    ports:
+      - "6060:6060"
+#    environment:
+      # 显式指定 Docker Host 路径
+#      - DOCKER_HOST=unix:///var/run/docker.sock
+#      - SPRING_PROFILES_ACTIVE=prod
+    volumes:
+      # 核心挂载：将宿主机的 Docker 控制权交给容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 输入数据目录：只读挂载到执行容器
+      - /var/lib/sandbox-inputs:/var/lib/sandbox-inputs:ro
+      # 挂载宿主机 Maven 目录，加速以后可能的容器内构建
+      - ~/.m2:/root/.m2:cached
+    healthcheck:
+      # 注意：Alpine 里的 curl 路径和参数确保正确
+      test: ["CMD-SHELL", "curl -f http://localhost:6060/health/ping || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    # 注意: sandbox-* 镜像需要先构建好 (docker-compose build)
+    # 实际的执行容器由 Java ContainerPool 动态创建和管理
+
+  # ==================== 沙箱运行时镜像构建 ====================
+  # 这些服务仅用于构建沙箱专用运行镜像（包含 sandbox 用户）
+  # 构建命令: docker-compose build
+  # 注意: 这些服务本身不会长期运行，实际的执行容器由 Java ContainerPool 管理
+  
+  # GCC 沙箱镜像 (C/C++)
+  sandbox-gcc:
+    build:
+      context: ./sandbox-images/gcc
+      dockerfile: Dockerfile
+    image: sandbox-gcc:latest
+    profiles: ["build-only"]  # 仅构建，不随 up 启动
+
+  # Java 8 沙箱镜像
+  sandbox-java8:
+    build:
+      context: ./sandbox-images/java
+      dockerfile: Dockerfile.java8
+    image: sandbox-java8:latest
+    profiles: ["build-only"]
+
+  # Java 17 沙箱镜像
+  sandbox-java17:
+    build:
+      context: ./sandbox-images/java
+      dockerfile: Dockerfile.java17
+    image: sandbox-java17:latest
+    profiles: ["build-only"]
+
+  # Python 3.10 沙箱镜像
+  sandbox-python:
+    build:
+      context: ./sandbox-images/python
+      dockerfile: Dockerfile
+    image: sandbox-python:latest
+    profiles: ["build-only"]
+
+  # Golang 1.20 沙箱镜像
+  sandbox-golang:
+    build:
+      context: ./sandbox-images/golang
+      dockerfile: Dockerfile
+    image: sandbox-golang:latest
+    profiles: ["build-only"]

@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: code-sand-box
+
+server:
+  port: 6060
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.github.ezzziy.codesandbox: DEBUG
+    com.github.dockerjava: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+# ==================== 沙箱配置 ====================
+sandbox:
+  # Docker 配置
+  docker:
+    # Docker Host（Linux 使用 unix socket，Windows/Mac 使用 tcp）
+    # Linux: unix:///var/run/docker.sock
+    host: ${DOCKER_HOST:unix:///var/run/docker.sock}
+    connect-timeout: 30
+    response-timeout: 60
+    max-connections: 100
+
+  # 容器池配置（热容器机制）
+  pool:
+    # 是否启用容器池（提升性能）
+    enabled: true
+    # 每种语言的最小容器数
+    min-size: 1
+    # 每种语言的最大容器数
+    max-size: 4
+    # 容器最大空闲时间（分钟）
+    max-idle-minutes: 10
+    # 容器最大使用次数（达到后重建）
+    max-use-count: 100
+
+  # 代码执行配置
+  execution:
+    # 编译超时时间（秒）
+    compile-timeout: 30
+    # 单次执行运行超时时间（秒）
+    run-timeout: 10
+    # 总执行超时时间（秒）
+    total-timeout: 300
+    # 内存限制（MB）
+    memory-limit: 256
+    # CPU 限制（核心数）
+    cpu-limit: 1.0
+    # 输出大小限制（字节）
+    output-limit: 65536
+    # 最大进程数（容器池模式需要足够大以支持多次 exec）
+    max-processes: 1024
+    # 最大打开文件数
+    max-open-files: 256
+    # 最大输入数量（单次请求）
+    max-test-cases: 100
+    # 工作目录（与宿主机保持一致）
+    work-dir: /var/lib/sandbox-work
+    # 是否启用危险代码扫描
+    enable-code-scan: true
+    # 最大并发容器数（启用容器池时需要足够大，建议 = 语言数 × pool.max-size）
+    max-concurrent-containers: 50
+
+  # 缓存配置
+  cache:
+    # 最大缓存条目数
+    max-size: 500
+    # 缓存过期时间（分钟）
+    expire-minutes: 60
+
+  # 输入数据配置
+  input-data:
+    # 本地存储目录（与宿主机保持一致）
+    storage-dir: /var/lib/sandbox-inputs
+    # 下载超时时间（毫秒）
+    download-timeout: 30000
+    # 最大文件大小（字节，默认 10MB）
+    max-file-size: 10485760
