@@ -1,403 +1,161 @@
-# Code Sandbox - OJ 代码沙箱服务
+<div align="center">
+  <h1>🛡️ Ezzi Code Sandbox</h1>
+  <p>
+    <strong>为在线评测系统 (OJ) 设计的安全、高效、可扩展的 Docker 代码执行沙箱</strong>
+  </p>
 
-> 安全、高效的在线代码执行沙箱，支持多种编程语言
+  <p>
+    <a href="#-核心特性">核心特性</a> •
+    <a href="#-快速开始">快速开始</a> •
+    <a href="#-系统架构">系统架构</a> •
+    <a href="#-api-使用">API 使用</a>
+  </p>
 
-## 📋 概述
-
-Code Sandbox 是一个基于 Docker 的代码执行沙箱服务，为在线评测系统（OJ）提供安全隔离的代码编译和运行环境。
-
-### 支持的语言
-
-| 语言 | 镜像 | 编译器/解释器 |
-|------|------|---------------|
-| C | gcc:11 | GCC 11 |
-| C++ | gcc:11 | G++ 11 |
-| Java 8 | eclipse-temurin:8-jdk-alpine | OpenJDK 8 |
-| Java 17 | eclipse-temurin:17-jdk-alpine | OpenJDK 17 |
-| Python 3 | python:3.10 | Python 3.10 |
-| Go | golang:1.20 | Go 1.20 |
-
-## 🚀 快速部署
-
-### 系统要求
-
-- **操作系统**: Linux (推荐 Ubuntu 22.04 LTS)
-- **Docker**: 20.10+
-- **内存**: 最低 4GB，推荐 8GB+
-- **磁盘**: 最低 20GB 可用空间
+  <p>
+    <img src="https://img.shields.io/badge/Java-21-orange?logo=java" alt="Java 21">
+    <img src="https://img.shields.io/badge/Spring%20Boot-3.x-green?logo=springboot" alt="Spring Boot 3">
+    <img src="https://img.shields.io/badge/Docker-20.10+-blue?logo=docker" alt="Docker">
+    <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License">
+  </p>
+</div>
 
 ---
 
-## 🔧 部署方式
-
-### 方式一：Docker Compose 部署（推荐）
-
-**优点**: 一键部署，自动管理依赖，配置清晰
-
-**部署步骤:**
-
-#### 1. 安装 Docker（如已安装可跳过）
-
-```bash
-# Ubuntu/Debian
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-#### 2. 创建必需目录
-
-```bash
-# 沙箱工作目录（存放临时编译文件）
-sudo mkdir -p /var/lib/sandbox-work
-sudo chmod 777 /var/lib/sandbox-work
-
-# 输入数据目录（存放测试用例缓存）
-sudo mkdir -p /var/lib/sandbox-inputs
-sudo chmod 755 /var/lib/sandbox-inputs
-```
-
-> ⚠️ **重要**: 这两个目录路径必须与 `application.yml` 中的配置一致，且容器内外使用相同的绝对路径！
-
-#### 3. 预拉取语言镜像
-
-```bash
-# 拉取所有语言运行时镜像（首次部署必须执行）
-docker pull gcc:11
-docker pull eclipse-temurin:8-jdk-alpine
-docker pull eclipse-temurin:17-jdk-alpine
-docker pull python:3.10
-docker pull golang:1.20
-```
-
-#### 4. 启动服务
-
-```bash
-# 进入项目目录
-cd code-sand-box
-
-# 构建并启动
-docker compose up -d --build
-
-# 查看启动日志
-docker compose logs -f sandbox
-```
-
-#### 5. 验证部署
-
-```bash
-# 健康检查
-curl http://localhost:6060/sandbox/api/health/ping
-# 预期返回: pong
-
-# 查看支持的语言
-curl http://localhost:6060/sandbox/api/execute/languages
-```
-
----
-
-### 方式二：Docker 手动部署
-
-**适用场景**: 不想使用 Docker Compose，或需要更灵活的配置
-
-**部署步骤:**
-
-#### 1-3. 同上（安装 Docker、创建目录、拉取镜像）
-
-#### 4. 构建镜像
-
-```bash
-cd code-sand-box
-docker build -t code-sandbox:latest .
-```
-
-#### 5. 运行容器
-
-```bash
-docker run -d \
-  --name code-sandbox \
-  --user root \
-  -p 6060:6060 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /var/lib/sandbox-work:/var/lib/sandbox-work \
-  -v /var/lib/sandbox-inputs:/var/lib/sandbox-inputs \
-  --restart unless-stopped \
-  code-sandbox:latest
-```
-
-#### 6. 查看日志
-
-```bash
-docker logs -f code-sandbox
-```
-
----
-
-### 方式三：宿主机直接部署（不推荐）
-
-**适用场景**: 开发环境测试，或无法使用 Docker 的情况
-
-**前置要求:**
-- JDK 21+
-- Maven 3.9+
-- Docker（用于执行用户代码）
-
-**部署步骤:**
-
-#### 1. 编译项目
-
-```bash
-cd code-sand-box
-mvn clean package -DskipTests
-```
-
-#### 2. 创建目录
-
-```bash
-sudo mkdir -p /var/lib/sandbox-work
-sudo chmod 777 /var/lib/sandbox-work
-
-sudo mkdir -p /var/lib/sandbox-inputs
-sudo chmod 755 /var/lib/sandbox-inputs
-```
-
-#### 3. 预拉取语言镜像
-
-```bash
-docker pull gcc:11
-docker pull eclipse-temurin:8-jdk-alpine
-docker pull eclipse-temurin:17-jdk-alpine
-docker pull python:3.10
-docker pull golang:1.20
-```
-
-#### 4. 启动应用
-
-```bash
-java -jar target/code-sand-box-*.jar \
-  --server.port=6060 \
-  --sandbox.docker.host=unix:///var/run/docker.sock
-```
-
-或使用 systemd 管理：
-
-```bash
-# 创建 systemd 服务文件
-sudo tee /etc/systemd/system/code-sandbox.service > /dev/null <<EOF
-[Unit]
-Description=Code Sandbox Service
-After=docker.service
-Requires=docker.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/code-sand-box
-ExecStart=/usr/bin/java -jar /opt/code-sand-box/target/code-sand-box-*.jar
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 启动服务
-sudo systemctl daemon-reload
-sudo systemctl enable code-sandbox
-sudo systemctl start code-sandbox
-
-# 查看状态
-sudo systemctl status code-sandbox
-```
-
-**注意事项:**
-- ⚠️ 宿主机部署需要确保 Java 进程有权限访问 Docker Socket
-- ⚠️ 建议使用 root 用户或将用户加入 docker 组：`sudo usermod -aG docker $USER`
-
----
-
-### 部署方式对比
-
-| 部署方式 | 难度 | 隔离性 | 维护性 | 推荐场景 |
-|---------|------|--------|--------|----------|
-| Docker Compose | ⭐ 简单 | ⭐⭐⭐ 高 | ⭐⭐⭐ 好 | 生产环境（推荐） |
-| Docker 手动 | ⭐⭐ 中等 | ⭐⭐⭐ 高 | ⭐⭐ 中等 | 需要灵活配置 |
-| 宿主机部署 | ⭐⭐⭐ 复杂 | ⭐ 低 | ⭐ 差 | 开发测试 |
-
-## 📁 目录结构说明
-
-```
-宿主机目录结构:
-├── /var/lib/sandbox-work/      # 沙箱工作目录
-│   └── exec-{requestId}/       # 每次执行的临时目录（自动清理）
-│       ├── Main.java           # 源代码文件
-│       └── Main.class          # 编译产物
-│
-└── /var/lib/sandbox-inputs/    # 输入数据缓存目录
-    └── {questionId}/           # 按题目 ID 组织
-        └── {hash}.txt          # 缓存的输入文件
-```
-
-### 目录权限要求
-
-| 目录 | 权限 | 说明 |
-|------|------|------|
-| `/var/lib/sandbox-work` | 777 | 容器内 nobody 用户需要写入编译产物 |
-| `/var/lib/sandbox-inputs` | 755 | 仅沙箱服务需要读写 |
-
-### Docker Socket 挂载原理
-
-**容器如何访问宿主机 Docker？**
-
-本项目采用 **Docker-in-Docker (DinD)** 的 **Socket 挂载方案**：
-
-```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
-```
-
-**工作原理：**
-1. 沙箱服务容器挂载宿主机的 Docker Socket（`/var/run/docker.sock`）
-2. 容器内的应用通过这个 Socket 与**宿主机的 Docker 守护进程**通信
-3. 创建的执行容器是**兄弟容器**（sibling containers），运行在宿主机而非嵌套容器内
-4. 所有容器共享宿主机的内核，性能接近原生
-
-**优点：**
-- ✅ 无需真正的 Docker-in-Docker，性能更好
-- ✅ 资源隔离更彻底（执行容器独立运行）
-- ✅ 避免嵌套虚拟化的复杂性
-
-**注意事项：**
-- ⚠️ 沙箱容器拥有宿主机 Docker 的**完全控制权**
-- ⚠️ 工作目录路径必须在容器内外保持一致（如 `/var/lib/sandbox-work`）
-- ⚠️ 生产环境建议限制沙箱容器的权限和网络访问
+## 📖 项目简介
+
+**Ezzi Code Sandbox** 是一个专为在线评测系统 (Online Judge) 打造的高性能、安全的代码执行服务。本项目基于 Spring Boot 和 Docker 构建，旨在为多种编程语言提供安全、隔离的编译和运行环境。
+
+与传统的进程级沙箱不同，本项目利用 **Docker-in-Docker (Socket 挂载)** 技术实现了更强的隔离性，同时保持了接近原生的执行性能。它能够自动管理容器生命周期，严格控制资源使用（CPU、内存、时间），并实施主要的安全策略。
+
+## ✨ 核心特性
+
+- **🔐 强效隔离**: 每次代码执行都在独立的、临时的 Docker 容器中运行，互不干扰。
+- **⚡ 高性能**: 直接利用 Docker API 进行容器的秒级创建与销毁；支持容器复用策略（可选）。
+- **🌍 多语言支持**:
+  - **C** (GCC 11)
+  - **C++** (G++ 11)
+  - **Java** (JDK 8 / 17)
+  - **Python** (3.10)
+  - **Go** (1.20)
+- **🛡️ 安全优先**:
+  - 严格的内存与执行时间限制。
+  - 输出内容大小限制（防止内存溢出）。
+  - 只读文件系统（除特定的工作目录外）。
+  - 网络访问隔离。
+- **🚀 极简部署**: 支持 Docker Compose 一键部署。
+
+## 🛠 技术栈
+
+- **核心框架**: Spring Boot 3.5.7
+- **容器化**: Docker & Docker Java Client (3.3.4)
+- **工具库**: Hutool, Lombok, Caffeine (本地缓存)
+- **存储**: MinIO / Aliyun OSS (用于测试用例管理)
+
+## 🚀 快速开始
+
+推荐使用 Docker Compose 进行快速部署。
+
+### 环境要求
+- Linux / macOS / Windows (推荐 WSL2)
+- **Docker** 20.10+
+- **Docker Compose**
+
+### 安装步骤
+
+1.  **克隆项目**
+    ```bash
+    git clone https://github.com/ezzzi-y/ezzi-code-sand-box.git
+    cd ezzi-code-sand-box
+    ```
+
+2.  **拉取语言镜像** (仅首次需要在宿主机执行)
+    ```bash
+    # 这些是代码执行所必需的基础镜像
+    docker pull gcc:11
+    docker pull eclipse-temurin:8-jdk-alpine
+    docker pull eclipse-temurin:17-jdk-alpine
+    docker pull python:3.10
+    docker pull golang:1.20
+    ```
+
+3.  **启动服务**
+    ```bash
+    docker-compose up -d
+    ```
+
+4.  **验证服务状态**
+    ```bash
+    curl http://localhost:6060/sandbox/api/health/ping
+    # 预期响应: "pong"
+    ```
 
 ## ⚙️ 配置说明
 
-### 核心配置项 (`application.yml`)
+核心配置位于 `application.yml` 文件中：
 
 ```yaml
 sandbox:
   execution:
-    work-dir: /var/lib/sandbox-work      # 工作目录（必须与宿主机一致）
-    compile-timeout: 30                   # 编译超时（秒）
-    run-timeout: 10                       # 运行超时（秒）
-    memory-limit: 256                     # 内存限制（MB）
-    output-limit: 65536                   # 输出限制（字节）
-    enable-code-scan: true                # 启用危险代码扫描
-
-  input-data:
-    storage-dir: /var/lib/sandbox-inputs  # 输入数据目录（必须与宿主机一致）
+    work-dir: /var/lib/sandbox-work      # 宿主机上用于存放临时文件的路径
+    compile-timeout: 30                   # 编译超时时间 (秒)
+    run-timeout: 10                       # 运行超时时间 (秒)
+    memory-limit: 256                     # 内存限制 (MB)
+  docker:
+    host: unix:///var/run/docker.sock     # Docker Socket 连接地址
 ```
 
-### 环境变量
+## 🔌 API 使用
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker 连接地址 |
-| `SERVER_PORT` | `6060` | 服务端口 |
+### 执行代码 (HTTP)
 
-## 🔍 常用命令
+**接口地址**: `POST /sandbox/api/execute`
 
-```bash
-# 启动服务
-docker-compose up -d
-
-# 停止服务
-docker-compose down
-
-# 查看日志
-docker-compose logs -f sandbox
-
-# 重新构建
-docker-compose up -d --build
-
-# 清理悬空镜像
-docker image prune -f
-
-# 清理工作目录（如果有残留）
-sudo rm -rf /var/lib/sandbox-work/exec-*
+**请求示例**:
+```json
+{
+  "requestId": "test-req-001",
+  "language": "python3",
+  "code": "print(sum(map(int, input().split())))",
+  "input": "10 20",
+  "timeLimit": 1000,
+  "memoryLimit": 256
+}
 ```
 
-## 🧪 API 测试
-
-### 执行代码
-
-```bash
-curl -X POST http://localhost:6060/sandbox/api/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "test-001",
-    "code": "print(sum(map(int, input().split())))",
-    "language": "python3",
-    "input": "10 20",
-    "timeLimit": 1000,
-    "memoryLimit": 256
-}'
+**响应示例**:
+```json
+{
+  "status": "SUCCESS",
+  "exitCode": 0,
+  "output": "30\n",
+  "errorMessage": null,
+  "timeCost": 35,
+  "memoryCost": 6204
+}
 ```
 
-### 批量执行（多测试用例）
+## 🏗 系统架构
 
-```bash
-curl -X POST http://localhost:6060/sandbox/api/execute/batch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "test-002",
-    "code": "#include <stdio.h>\nint main() { int a,b; scanf(\"%d%d\",&a,&b); printf(\"%d\",a+b); return 0; }",
-    "language": "c",
-    "inputList": ["1 2", "10 20", "100 200"],
-    "timeLimit": 1000,
-    "memoryLimit": 256
-}'
-```
+本项目采用分层架构设计，分离了 API 层、业务逻辑层和 Docker 执行器层。
 
-## 🔧 故障排查
+> 如需了解详细的架构设计，请参阅 [架构设计文档](docs/01-ARCHITECTURE.md)。
 
-### 常见问题
+## 🤝 贡献指南
 
-**1. 容器无法启动**
-```bash
-# 检查 Docker 是否运行
-sudo systemctl status docker
+欢迎提交 Issue 和 Pull Request！
 
-# 检查端口占用
-sudo lsof -i :6060
-```
-
-**2. 代码执行超时**
-```bash
-# 检查语言镜像是否存在
-docker images | grep -E "gcc|temurin|python|golang"
-
-# 如果没有，重新拉取
-docker pull gcc:11
-```
-
-**3. 权限问题**
-```bash
-# 检查目录权限
-ls -la /var/lib/sandbox-work
-ls -la /var/lib/sandbox-inputs
-
-# 修复权限
-sudo chmod 777 /var/lib/sandbox-work
-```
-
-**4. 编译产物无法写入**
-```bash
-# 确保工作目录对所有用户可写
-sudo chmod -R 777 /var/lib/sandbox-work
-```
-
-## 📖 更多文档
-
-- [架构设计](docs/01-ARCHITECTURE.md)
-- [API 设计](docs/02-API-DESIGN.md)
-- [Docker 执行器](docs/03-DOCKER-EXECUTOR.md)
-- [语言支持](docs/04-LANGUAGE-SUPPORT.md)
-- [安全机制](docs/05-SECURITY.md)
-- [Ubuntu 部署指南](docs/DEPLOY-UBUNTU.md)
+1.  Fork 本项目
+2.  创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3.  提交改动 (`git commit -m 'Add some AmazingFeature'`)
+4.  推送到分支 (`git push origin feature/AmazingFeature`)
+5.  提交 Pull Request
 
 ## 📄 许可证
 
-MIT License
+本项目基于 **MIT License** 开源。详情请参阅 [LICENSE](LICENSE) 文件。
+
+---
+
+<div align="center">
+  <p>Made with ❤️ by <a href="https://github.com/ezzzi-y">Ezzzi-Y</a></p>
+</div>
