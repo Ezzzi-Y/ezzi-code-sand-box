@@ -27,6 +27,8 @@ public class Java8LanguageStrategy implements LanguageStrategy {
             Pattern.compile("\\.invoke\\s*\\("),
             Pattern.compile("setAccessible\\s*\\(\\s*true"),
             // 文件操作
+            Pattern.compile("new\\s+File\\s*\\("),
+            Pattern.compile("new\\s+java\\.io\\.File\\s*\\("),
             Pattern.compile("FileInputStream"),
             Pattern.compile("FileOutputStream"),
             Pattern.compile("RandomAccessFile"),

@@ -22,12 +22,12 @@ public class CodeSandBoxApplication {
                 
                 ╔═══════════════════════════════════════════════════════╗
                 ║                                                       ║
-                ║      OJ Code Sandbox Service Started Successfully     ║
+                ║      Code Sandbox Service Started Successfully        ║
                 ║                                                       ║
                 ║   Supported Languages: C, C++, Java8, Java11,         ║
-                ║                        Python3, Golang                ║
+                ║                        Python3                        ║
                 ║                                                       ║
-                ║   API Docs: http://localhost:6060/sandbox/api/health  ║
+                ║   API Docs: http://localhost:6060/health              ║
                 ║                                                       ║
                 ╚═══════════════════════════════════════════════════════╝
                 """);
