@@ -1,5 +1,7 @@
-package com.github.ezzziy.codesandbox.model.dto;
+package com.github.ezzziy.codesandbox.model.vo;
 
+import com.github.ezzziy.codesandbox.model.dto.ExecutionResult;
+import com.github.ezzziy.codesandbox.model.dto.ExecutionTimeStats;
 import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;

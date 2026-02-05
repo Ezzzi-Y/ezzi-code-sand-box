@@ -1,6 +1,6 @@
 package com.github.ezzziy.codesandbox.exception;
 
-import com.github.ezzziy.codesandbox.model.dto.ExecuteResponse;
+import com.github.ezzziy.codesandbox.model.vo.ExecuteResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

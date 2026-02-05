@@ -2,7 +2,7 @@ package com.github.ezzziy.codesandbox.controller;
 
 import com.github.ezzziy.codesandbox.common.result.Result;
 import com.github.ezzziy.codesandbox.model.dto.ExecuteRequest;
-import com.github.ezzziy.codesandbox.model.dto.ExecuteResponse;
+import com.github.ezzziy.codesandbox.model.vo.ExecuteResponse;
 import com.github.ezzziy.codesandbox.service.ExecutionService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;

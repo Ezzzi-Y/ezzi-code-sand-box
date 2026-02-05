@@ -19,7 +19,7 @@ services:
       # 核心挂载：将宿主机的 Docker 控制权交给容器
       - /var/run/docker.sock:/var/run/docker.sock
       # 输入数据目录：只读挂载到执行容器
-      - /var/lib/sandbox-inputs:/var/lib/sandbox-inputs:ro
+      - /var/lib/sandbox-inputs:/var/lib/sandbox-inputs
       # 挂载宿主机 Maven 目录，加速以后可能的容器内构建
       - ~/.m2:/root/.m2:cached
     healthcheck:
@@ -68,12 +68,4 @@ services:
       context: ./sandbox-images/python
       dockerfile: Dockerfile
     image: sandbox-python:latest
-    profiles: ["build-only"]
-
-  # Golang 1.20 沙箱镜像
-  sandbox-golang:
-    build:
-      context: ./sandbox-images/golang
-      dockerfile: Dockerfile
-    image: sandbox-golang:latest
     profiles: ["build-only"]

@@ -13,12 +13,10 @@ import lombok.Getter;
 public enum LanguageEnum {
 
     C("c", "C", "gcc:11", ".c"),
-    CPP("cpp", "C++11", "gcc:11", ".cpp"),
+    CPP("cpp11", "C++11", "gcc:11", ".cpp"),
     JAVA8("java8", "Java 8", "eclipse-temurin:8-jdk-alpine", ".java"),
     JAVA17("java17", "Java 17", "eclipse-temurin:17-jdk-alpine", ".java"),
-    PYTHON3("python3", "Python 3", "python:3.10", ".py"),
-    GOLANG("golang", "Go", "golang:1.20", ".go");
-
+    PYTHON3("python3", "Python 3", "python:3.10", ".py");
     /**
      * 语言标识符
      */
@@ -54,12 +52,6 @@ public enum LanguageEnum {
         return null;
     }
 
-    /**
-     * 判断是否为编译型语言
-     */
-    public boolean isCompiled() {
-        return this == C || this == CPP || this == JAVA8 || this == JAVA17 || this == GOLANG;
-    }
 
     /**
      * 判断是否为 Java 语言
