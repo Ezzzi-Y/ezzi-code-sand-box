@@ -31,9 +31,18 @@ public class GlobalExceptionHandler {
 
         ExecuteResponse response;
         switch (e.getStatus()) {
-            case COMPILE_ERROR -> response = ExecuteResponse.compileError(e.getRequestId(), e.getMessage());
-            case DANGEROUS_CODE -> response = ExecuteResponse.dangerousCode(e.getRequestId(), e.getMessage());
-            default -> response = ExecuteResponse.systemError(e.getRequestId(), e.getMessage());
+            case COMPILE_ERROR -> response = ExecuteResponse.builder()
+                    .status(e.getStatus())
+                    .compileOutput(e.getMessage())
+                    .build();
+            case DANGEROUS_CODE -> response = ExecuteResponse.builder()
+                    .status(e.getStatus())
+                    .errorMessage(e.getMessage())
+                    .build();
+            default -> response = ExecuteResponse.builder()
+                    .status(e.getStatus())
+                    .errorMessage(e.getMessage())
+                    .build();
         }
 
         return ResponseEntity.ok(response);

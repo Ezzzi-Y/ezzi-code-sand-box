@@ -68,7 +68,7 @@ sandbox:
   # 缓存配置
   cache:
     # 最大缓存条目数
-    max-size: 500
+    max-size: 5000
     # 缓存过期时间（分钟）
     expire-minutes: 60
 

@@ -671,8 +671,7 @@ import com.github.ezzziy.codesandbox.config.ExecutionConfig;
 import com.github.ezzziy.codesandbox.docker.ContainerManager;
 import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategy;
 import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategyFactory;
-import com.github.ezzziy.codesandbox.model.dto.*;
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import com.github.ezzziy.codesandbox.model.response.ExecutionResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -682,7 +681,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.UUID;
 
 @Slf4j
 @Component
@@ -702,7 +700,7 @@ public class DockerCodeExecutor implements CodeExecutor {
         try {
             // 1. 获取语言策略
             LanguageStrategy strategy = strategyFactory.getStrategy(
-                    context.getLanguage(), 
+                    context.getLanguage(),
                     context.getLanguageVersion()
             );
 
@@ -774,14 +772,14 @@ public class DockerCodeExecutor implements CodeExecutor {
      */
     private CompileResult compile(String containerId, LanguageStrategy strategy, ExecutionContext context) {
         log.debug("开始编译: executionId={}, language={}", context.getExecutionId(), context.getLanguage());
-        
+
         String[] compileCommand = strategy.getCompileCommand(context);
         long compileTimeout = executionConfig.getCompileTimeout();
-        
+
         ExecResult execResult = containerManager.execInContainer(containerId, compileCommand, compileTimeout);
-        
+
         boolean success = execResult.getExitCode() == 0 && !execResult.getTimedOut();
-        
+
         return CompileResult.builder()
                 .success(success)
                 .output(execResult.getStdout())
@@ -795,25 +793,25 @@ public class DockerCodeExecutor implements CodeExecutor {
      */
     private RunResult run(String containerId, LanguageStrategy strategy, ExecutionContext context) {
         log.debug("开始执行: executionId={}, timeLimit={}ms", context.getExecutionId(), context.getTimeLimit());
-        
+
         // 构建执行命令（带输入重定向）
         String[] runCommand = strategy.getRunCommand(context);
-        
+
         // 实际的执行命令需要处理输入重定向
         String[] wrappedCommand = wrapWithInputRedirect(runCommand);
-        
+
         ExecResult execResult = containerManager.execInContainer(
-                containerId, 
-                wrappedCommand, 
+                containerId,
+                wrappedCommand,
                 context.getTimeLimit() + 1000  // 额外 1 秒缓冲
         );
-        
+
         // 获取内存使用
         long memoryUsed = containerManager.getMemoryUsage(containerId) / 1024;  // 转为 KB
-        
+
         // 解析退出信号
         String signal = parseSignal(execResult.getExitCode());
-        
+
         return RunResult.builder()
                 .stdout(execResult.getStdout())
                 .stderr(execResult.getStderr())
@@ -832,24 +830,24 @@ public class DockerCodeExecutor implements CodeExecutor {
         if (runResult.getTimeUsed() >= context.getTimeLimit()) {
             return ExecutionStatus.TIME_LIMIT_EXCEEDED;
         }
-        
+
         // 内存超限
         if (runResult.getMemoryUsed() > context.getMemoryLimit() * 1024L) {
             return ExecutionStatus.MEMORY_LIMIT_EXCEEDED;
         }
-        
+
         // 运行时错误（非零退出码）
         if (runResult.getExitCode() != 0) {
             // 特殊信号处理
             if (runResult.getSignal() != null) {
-                if ("SIGKILL".equals(runResult.getSignal()) && 
-                    runResult.getMemoryUsed() > context.getMemoryLimit() * 1024L * 0.9) {
+                if ("SIGKILL".equals(runResult.getSignal()) &&
+                        runResult.getMemoryUsed() > context.getMemoryLimit() * 1024L * 0.9) {
                     return ExecutionStatus.MEMORY_LIMIT_EXCEEDED;
                 }
             }
             return ExecutionStatus.RUNTIME_ERROR;
         }
-        
+
         return ExecutionStatus.ACCEPTED;
     }
 
@@ -917,7 +915,7 @@ public class DockerCodeExecutor implements CodeExecutor {
                 log.warn("清理容器失败: containerId={}", containerId);
             }
         }
-        
+
         // 清理工作目录
         if (workDir != null) {
             try {

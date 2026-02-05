@@ -29,7 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import static com.github.ezzziy.codesandbox.model.enums.ExecutionStatus.SUCCESS;
+import static com.github.ezzziy.codesandbox.common.enums.ExecutionStatus.SUCCESS;
 
 @Slf4j
 @Component
@@ -265,6 +265,11 @@ public class DockerCodeExecutor {
      */
     private static final String TIME_MARKER = "__EXEC_TIME_NS__:";
 
+    /**
+     * 内存标记前缀，用于从输出中提取内存使用量
+     */
+    private static final String MEMORY_MARKER = "__EXEC_MEM_KB__:";
+
     private CommandResult executeCommand(String containerId,
                                          String[] cmd,
                                          String input,
@@ -272,22 +277,37 @@ public class DockerCodeExecutor {
         log.debug("执行容器命令: containerId={}, cmd={}, hasInput={}, timeout={}ms",
                 containerId, String.join(" ", cmd), input != null && !input.isEmpty(), timeoutMs);
         try {
-            // 构建带精确计时的命令
+            // 构建带精确计时和内存监测的命令
             // 使用 date +%s%N 获取纳秒级时间戳（在程序开始和结束时各记录一次）
+            // 使用 /usr/bin/time 获取实际用户程序的内存使用量(maxrss)
+            // 关键: 使用exec替换当前shell进程,这样/usr/bin/time统计的就是实际程序而非sh进程
             String originalCmd = String.join(" ", cmd);
             String timedCmd;
             
             if (input != null && !input.isEmpty()) {
-                // 有输入：使用 printf 管道 + 计时包装
+                // 有输入：使用 printf 管道 + 计时包装 + 内存监测
+                // 使用exec让用户程序替换shell进程,确保time统计的是用户程序而非shell
+                // 使用-o参数将time的输出写入临时文件,避免与程序输出混淆
                 String escapedInput = escapeShellInput(input);
                 timedCmd = String.format(
-                        "START=$(date +%%s%%N); printf '%%s' '%s' | %s; END=$(date +%%s%%N); echo '%s'$((END-START))",
-                        escapedInput, originalCmd, TIME_MARKER);
+                        "START=$(date +%%s%%N); " +
+                        "MEMFILE=/tmp/mem_$$; " +
+                        "printf '%%s' '%s' | /usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "END=$(date +%%s%%N); " +
+                        "echo '%s'$((END-START)); " +
+                        "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
+                        "echo '%s'$MEM",
+                        escapedInput, originalCmd, TIME_MARKER, MEMORY_MARKER);
             } else {
-                // 无输入：直接计时包装
+                // 无输入：直接计时包装 + 内存监测
+                // 使用/usr/bin/time直接包裹用户命令,格式化输出只显示maxrss(峰值内存KB)
                 timedCmd = String.format(
-                        "START=$(date +%%s%%N); %s; END=$(date +%%s%%N); echo '%s'$((END-START))",
-                        originalCmd, TIME_MARKER);
+                        "START=$(date +%%s%%N); " +
+                        "MEM=$(/usr/bin/time -f '%%M' sh -c 'exec %s' 2>&1 | tail -1); " +
+                        "END=$(date +%%s%%N); " +
+                        "echo '%s'$((END-START)); " +
+                        "echo '%s'$MEM",
+                        originalCmd, TIME_MARKER, MEMORY_MARKER);
             }
             
             String[] actualCmd = new String[]{"sh", "-c", timedCmd};
@@ -332,16 +352,23 @@ public class DockerCodeExecutor {
             String stdoutStr = stdout.toString(StandardCharsets.UTF_8);
             String stderrStr = stderr.toString(StandardCharsets.UTF_8);
             
-            // 从输出中提取精确执行时间（纳秒），并移除时间标记
+            // 从输出中提取精确执行时间和内存使用，并移除标记
             long executionTime = javaExecutionTime; // 默认使用 Java 层面时间
+            long memoryUsage = 0; // 默认 0，如果无法提取则使用此值
             String cleanedOutput = stdoutStr;
             
+            // 提取时间标记
             int timeMarkerIndex = stdoutStr.lastIndexOf(TIME_MARKER);
             if (timeMarkerIndex != -1) {
                 // 提取时间标记之前的实际输出
                 cleanedOutput = stdoutStr.substring(0, timeMarkerIndex);
-                // 提取纳秒时间并转换为毫秒
-                String timeStr = stdoutStr.substring(timeMarkerIndex + TIME_MARKER.length()).trim();
+                // 提取时间标记后面的纳秒时间
+                String timeStr = stdoutStr.substring(timeMarkerIndex + TIME_MARKER.length());
+                int memMarkerIndex = timeStr.indexOf(MEMORY_MARKER);
+                if (memMarkerIndex != -1) {
+                    timeStr = timeStr.substring(0, memMarkerIndex);
+                }
+                timeStr = timeStr.trim();
                 try {
                     long nanoTime = Long.parseLong(timeStr);
                     executionTime = nanoTime / 1_000_000; // 纳秒转毫秒
@@ -350,12 +377,25 @@ public class DockerCodeExecutor {
                 } catch (NumberFormatException e) {
                     log.warn("解析执行时间失败，使用 Java 层面时间: timeStr={}", timeStr);
                 }
-            } else {
-                log.warn("未找到时间标记，使用 Java 层面时间");
             }
             
-            log.debug("获取命令输出: execId={}, exitCode={}, stdoutLength={}, stderrLength={}, executionTime={}ms",
-                    execId, exitCode, cleanedOutput.length(), stderrStr.length(), executionTime);
+            // 提取内存标记
+            int memoryMarkerIndex = stdoutStr.lastIndexOf(MEMORY_MARKER);
+            if (memoryMarkerIndex != -1) {
+                String memStr = stdoutStr.substring(memoryMarkerIndex + MEMORY_MARKER.length()).trim();
+                try {
+                    memoryUsage = Long.parseLong(memStr);
+                    log.debug("提取内存使用: {}KB", memoryUsage);
+                } catch (NumberFormatException e) {
+                    log.warn("解析内存使用失败: memStr={}", memStr);
+                    memoryUsage = 0;
+                }
+            } else {
+                log.warn("未找到内存标记，使用默认值 0");
+            }
+            
+            log.debug("获取命令输出: execId={}, exitCode={}, stdoutLength={}, stderrLength={}, executionTime={}ms, memory={}KB",
+                    execId, exitCode, cleanedOutput.length(), stderrStr.length(), executionTime, memoryUsage);
 
             int limit = executionConfig.getOutputLimit();
             if (cleanedOutput.length() > limit) {
@@ -367,13 +407,14 @@ public class DockerCodeExecutor {
                         .stdout(cleanedOutput.substring(0, limit))
                         .stderr(stderrStr)
                         .executionTime(executionTime)
+                        .memoryUsage(memoryUsage)
                         .errorMessage("输出超限")
                         .build();
             }
 
             return exitCode == 0
-                    ? CommandResult.success(cleanedOutput, stderrStr, executionTime, 0)
-                    : CommandResult.failure(exitCode, cleanedOutput, stderrStr, executionTime, 0);
+                    ? CommandResult.success(cleanedOutput, stderrStr, executionTime, memoryUsage)
+                    : CommandResult.failure(exitCode, cleanedOutput, stderrStr, executionTime, memoryUsage);
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -490,7 +531,9 @@ public class DockerCodeExecutor {
         log.debug("执行容器命令: containerId={}, workDir={}, cmd={}, hasInput={}, timeout={}ms",
                 containerId, workDir, String.join(" ", cmd), input != null && !input.isEmpty(), timeoutMs);
         try {
-            // 构建带精确计时的命令，并切换到任务工作目录
+            // 构建带精确计时和内存监测的命令，并切换到任务工作目录
+            // 使用 /usr/bin/time 获取实际用户程序的内存使用量(maxrss)
+            // 关键: 使用exec替换当前shell进程,这样/usr/bin/time统计的就是实际程序而非sh进程
             String originalCmd = String.join(" ", cmd);
             String timedCmd;
             
@@ -498,14 +541,29 @@ public class DockerCodeExecutor {
             String cdPrefix = "cd " + workDir + " && ";
             
             if (input != null && !input.isEmpty()) {
+                // 有输入：使用 printf 管道 + 计时包装 + 内存监测
+                // 使用exec让用户程序替换shell进程,确保time统计的是用户程序而非shell
+                // 使用-o参数将time的输出写入临时文件,避免与程序输出混淆
                 String escapedInput = escapeShellInput(input);
                 timedCmd = String.format(
-                        "%sSTART=$(date +%%s%%N); printf '%%s' '%s' | %s; END=$(date +%%s%%N); echo '%s'$((END-START))",
-                        cdPrefix, escapedInput, originalCmd, TIME_MARKER);
+                        "%sSTART=$(date +%%s%%N); " +
+                        "MEMFILE=/tmp/mem_$$; " +
+                        "printf '%%s' '%s' | /usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "END=$(date +%%s%%N); " +
+                        "echo '%s'$((END-START)); " +
+                        "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
+                        "echo '%s'$MEM",
+                        cdPrefix, escapedInput, originalCmd, TIME_MARKER, MEMORY_MARKER);
             } else {
+                // 无输入：直接计时包装 + 内存监测
+                // 使用/usr/bin/time直接包裹用户命令,格式化输出只显示maxrss(峰值内存KB)
                 timedCmd = String.format(
-                        "%sSTART=$(date +%%s%%N); %s; END=$(date +%%s%%N); echo '%s'$((END-START))",
-                        cdPrefix, originalCmd, TIME_MARKER);
+                        "%sSTART=$(date +%%s%%N); " +
+                        "MEM=$(/usr/bin/time -f '%%M' sh -c 'exec %s' 2>&1 | tail -1); " +
+                        "END=$(date +%%s%%N); " +
+                        "echo '%s'$((END-START)); " +
+                        "echo '%s'$MEM",
+                        cdPrefix, originalCmd, TIME_MARKER, MEMORY_MARKER);
             }
             
             String[] actualCmd = new String[]{"sh", "-c", timedCmd};
@@ -550,14 +608,21 @@ public class DockerCodeExecutor {
             String stdoutStr = stdout.toString(StandardCharsets.UTF_8);
             String stderrStr = stderr.toString(StandardCharsets.UTF_8);
             
-            // 从输出中提取精确执行时间（纳秒），并移除时间标记
+            // 从输出中提取精确执行时间和内存使用，并移除标记
             long executionTime = javaExecutionTime;
+            long memoryUsage = 0;
             String cleanedOutput = stdoutStr;
             
+            // 提取时间标记
             int timeMarkerIndex = stdoutStr.lastIndexOf(TIME_MARKER);
             if (timeMarkerIndex != -1) {
                 cleanedOutput = stdoutStr.substring(0, timeMarkerIndex);
-                String timeStr = stdoutStr.substring(timeMarkerIndex + TIME_MARKER.length()).trim();
+                String timeStr = stdoutStr.substring(timeMarkerIndex + TIME_MARKER.length());
+                int memMarkerIndex = timeStr.indexOf(MEMORY_MARKER);
+                if (memMarkerIndex != -1) {
+                    timeStr = timeStr.substring(0, memMarkerIndex);
+                }
+                timeStr = timeStr.trim();
                 try {
                     long nanoTime = Long.parseLong(timeStr);
                     executionTime = nanoTime / 1_000_000;
@@ -566,12 +631,25 @@ public class DockerCodeExecutor {
                 } catch (NumberFormatException e) {
                     log.warn("解析执行时间失败，使用 Java 层面时间: timeStr={}", timeStr);
                 }
-            } else {
-                log.warn("未找到时间标记，使用 Java 层面时间");
             }
             
-            log.debug("获取命令输出: execId={}, exitCode={}, stdoutLength={}, stderrLength={}, executionTime={}ms",
-                    execId, exitCode, cleanedOutput.length(), stderrStr.length(), executionTime);
+            // 提取内存标记
+            int memoryMarkerIndex = stdoutStr.lastIndexOf(MEMORY_MARKER);
+            if (memoryMarkerIndex != -1) {
+                String memStr = stdoutStr.substring(memoryMarkerIndex + MEMORY_MARKER.length()).trim();
+                try {
+                    memoryUsage = Long.parseLong(memStr);
+                    log.debug("提取内存使用: {}KB", memoryUsage);
+                } catch (NumberFormatException e) {
+                    log.warn("解析内存使用失败: memStr={}", memStr);
+                    memoryUsage = 0;
+                }
+            } else {
+                log.warn("未找到内存标记，使用默认值 0");
+            }
+            
+            log.debug("获取命令输出: execId={}, exitCode={}, stdoutLength={}, stderrLength={}, executionTime={}ms, memory={}KB",
+                    execId, exitCode, cleanedOutput.length(), stderrStr.length(), executionTime, memoryUsage);
 
             int limit = executionConfig.getOutputLimit();
             if (cleanedOutput.length() > limit) {
@@ -583,13 +661,14 @@ public class DockerCodeExecutor {
                         .stdout(cleanedOutput.substring(0, limit))
                         .stderr(stderrStr)
                         .executionTime(executionTime)
+                        .memoryUsage(memoryUsage)
                         .errorMessage("输出超限")
                         .build();
             }
 
             return exitCode == 0
-                    ? CommandResult.success(cleanedOutput, stderrStr, executionTime, 0)
-                    : CommandResult.failure(exitCode, cleanedOutput, stderrStr, executionTime, 0);
+                    ? CommandResult.success(cleanedOutput, stderrStr, executionTime, memoryUsage)
+                    : CommandResult.failure(exitCode, cleanedOutput, stderrStr, executionTime, memoryUsage);
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

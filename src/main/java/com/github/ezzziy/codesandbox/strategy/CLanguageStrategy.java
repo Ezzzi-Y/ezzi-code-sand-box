@@ -1,6 +1,6 @@
 package com.github.ezzziy.codesandbox.strategy;
 
-import com.github.ezzziy.codesandbox.model.enums.LanguageEnum;
+import com.github.ezzziy.codesandbox.common.enums.LanguageEnum;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;

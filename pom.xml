@@ -33,7 +33,6 @@
 
         <!-- sandbox -->
         <docker-java.version>3.3.4</docker-java.version>
-        <caffeine.version>3.1.8</caffeine.version>
         <commons-compress.version>1.26.0</commons-compress.version>
         <commons-io.version>2.15.1</commons-io.version>
     </properties>
@@ -101,17 +100,6 @@
             <groupId>com.github.docker-java</groupId>
             <artifactId>docker-java-transport-zerodep</artifactId>
             <version>${docker-java.version}</version>
-        </dependency>
-
-        <!-- 本地缓存 -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cache</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.github.ben-manes.caffeine</groupId>
-            <artifactId>caffeine</artifactId>
-            <version>${caffeine.version}</version>
         </dependency>
 
         <!-- 文件 / 压缩 -->

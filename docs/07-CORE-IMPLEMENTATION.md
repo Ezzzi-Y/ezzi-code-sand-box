@@ -43,7 +43,7 @@ import com.github.ezzziy.codesandbox.executor.CodeExecutor;
 import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategy;
 import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategyFactory;
 import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import com.github.ezzziy.codesandbox.model.request.BatchExecuteRequest;
 import com.github.ezzziy.codesandbox.model.request.ExecuteRequest;
 import com.github.ezzziy.codesandbox.model.response.*;
@@ -160,7 +160,7 @@ public class ExecutionServiceImpl implements ExecutionService {
             // 4. 先编译一次（编译型语言）
             CompileResult compileResult = null;
             String compiledArtifactPath = null;
-            
+
             if (strategy.needsCompilation()) {
                 // 单独编译，获取编译产物
                 compileResult = compileCode(request, strategy);
@@ -226,7 +226,7 @@ public class ExecutionServiceImpl implements ExecutionService {
                             .status(ExecutionStatus.SYSTEM_ERROR)
                             .build());
                     failed++;
-                    
+
                     if (Boolean.TRUE.equals(request.getStopOnFirstFailure())) {
                         break;
                     }
@@ -283,7 +283,7 @@ public class ExecutionServiceImpl implements ExecutionService {
         if (request.getTestCases().size() > 100) {
             throw new SandboxException("测试用例数量超过限制（100）");
         }
-        
+
         // 复用单个请求的校验逻辑
         ExecuteRequest singleRequest = ExecuteRequest.builder()
                 .language(request.getLanguage())
@@ -293,7 +293,7 @@ public class ExecutionServiceImpl implements ExecutionService {
                 .memoryLimit(request.getMemoryLimit())
                 .build();
         validateAndNormalize(singleRequest);
-        
+
         // 回写规范化后的值
         request.setTimeLimit(singleRequest.getTimeLimit());
         request.setMemoryLimit(singleRequest.getMemoryLimit());
@@ -475,7 +475,7 @@ public class MemoryLimitException extends SandboxException {
 ```java
 package com.github.ezzziy.codesandbox.exception;
 
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import com.github.ezzziy.codesandbox.model.response.CompileResult;
 import com.github.ezzziy.codesandbox.model.response.ExecutionResult;
 import com.github.ezzziy.codesandbox.model.response.Result;
@@ -578,8 +578,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(SandboxException.class)
     public ResponseEntity<Result<Void>> handleSandboxException(SandboxException e) {
         log.error("沙箱异常: code={}, message={}", e.getCode(), e.getMessage());
-        HttpStatus status = e.getCode() >= 50000 
-                ? HttpStatus.INTERNAL_SERVER_ERROR 
+        HttpStatus status = e.getCode() >= 50000
+                ? HttpStatus.INTERNAL_SERVER_ERROR
                 : HttpStatus.BAD_REQUEST;
         return ResponseEntity.status(status).body(Result.error(e.getCode(), e.getMessage()));
     }
@@ -1095,7 +1095,7 @@ logging:
 ```java
 package com.github.ezzziy.codesandbox.service;
 
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import com.github.ezzziy.codesandbox.model.request.ExecuteRequest;
 import com.github.ezzziy.codesandbox.model.response.ExecutionResult;
 import org.junit.jupiter.api.Test;
@@ -1113,15 +1113,15 @@ class ExecutionServiceTest {
     @Test
     void testExecuteCpp_APlusB() {
         String code = """
-            #include <iostream>
-            using namespace std;
-            int main() {
-                int a, b;
-                cin >> a >> b;
-                cout << a + b << endl;
-                return 0;
-            }
-            """;
+                #include <iostream>
+                using namespace std;
+                int main() {
+                    int a, b;
+                    cin >> a >> b;
+                    cout << a + b << endl;
+                    return 0;
+                }
+                """;
 
         ExecuteRequest request = ExecuteRequest.builder()
                 .language("cpp")
@@ -1141,8 +1141,8 @@ class ExecutionServiceTest {
     @Test
     void testExecutePython_HelloWorld() {
         String code = """
-            print("Hello, World!")
-            """;
+                print("Hello, World!")
+                """;
 
         ExecuteRequest request = ExecuteRequest.builder()
                 .language("python3")
@@ -1161,12 +1161,12 @@ class ExecutionServiceTest {
     @Test
     void testExecuteJava_CompileError() {
         String code = """
-            public class Main {
-                public static void main(String[] args) {
-                    System.out.println("Hello"  // 缺少括号
+                public class Main {
+                    public static void main(String[] args) {
+                        System.out.println("Hello"  // 缺少括号
+                    }
                 }
-            }
-            """;
+                """;
 
         ExecuteRequest request = ExecuteRequest.builder()
                 .language("java11")
@@ -1186,13 +1186,13 @@ class ExecutionServiceTest {
     @Test
     void testExecuteCpp_TimeLimit() {
         String code = """
-            #include <iostream>
-            using namespace std;
-            int main() {
-                while(true) {}  // 死循环
-                return 0;
-            }
-            """;
+                #include <iostream>
+                using namespace std;
+                int main() {
+                    while(true) {}  // 死循环
+                    return 0;
+                }
+                """;
 
         ExecuteRequest request = ExecuteRequest.builder()
                 .language("cpp")
@@ -1210,14 +1210,14 @@ class ExecutionServiceTest {
     @Test
     void testExecuteCpp_RuntimeError() {
         String code = """
-            #include <iostream>
-            using namespace std;
-            int main() {
-                int *p = nullptr;
-                *p = 1;  // 空指针访问
-                return 0;
-            }
-            """;
+                #include <iostream>
+                using namespace std;
+                int main() {
+                    int *p = nullptr;
+                    *p = 1;  // 空指针访问
+                    return 0;
+                }
+                """;
 
         ExecuteRequest request = ExecuteRequest.builder()
                 .language("cpp")

@@ -1,6 +1,6 @@
 package com.github.ezzziy.codesandbox.exception;
 
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import lombok.Getter;
 
 /**

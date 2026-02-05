@@ -1,6 +1,6 @@
 package com.github.ezzziy.codesandbox.model.dto;
 
-import com.github.ezzziy.codesandbox.model.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;

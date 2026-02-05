@@ -1,4 +1,4 @@
-package com.github.ezzziy.codesandbox.model.enums;
+package com.github.ezzziy.codesandbox.common.enums;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;

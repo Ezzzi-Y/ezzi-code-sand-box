@@ -11,13 +11,6 @@
 - ✅ 采集执行结果（stdout、stderr、exitCode、时间、内存）
 - ✅ 返回统一格式的执行结果
 
-本服务**不负责**：
-- ❌ 判题逻辑（对比预期输出）
-- ❌ 判断答案正确性
-- ❌ 存储用户提交记录
-- ❌ 管理题目数据
-- ❌ OSS 对象存储连接（由主服务提供预签名 URL）
-
 ### 1.2 技术栈
 
 | 组件 | 技术选型 | 版本 |
@@ -39,7 +32,6 @@
 | Java | 8 | `javac -encoding UTF-8 Main.java` | `java -Xmx{mem}m Main` |
 | Java | 11 | `javac -encoding UTF-8 Main.java` | `java -Xmx{mem}m Main` |
 | Python | 3.10 | - | `python3 main.py` |
-| Go | 1.20 | `go build -o main main.go` | `./main` |
 
 ---
 

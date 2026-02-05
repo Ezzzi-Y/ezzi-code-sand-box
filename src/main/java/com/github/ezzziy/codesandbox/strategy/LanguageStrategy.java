@@ -1,6 +1,6 @@
 package com.github.ezzziy.codesandbox.strategy;
 
-import com.github.ezzziy.codesandbox.model.enums.LanguageEnum;
+import com.github.ezzziy.codesandbox.common.enums.LanguageEnum;
 
 import java.util.List;
 import java.util.regex.Pattern;

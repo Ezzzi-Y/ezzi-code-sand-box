@@ -7,6 +7,13 @@ import lombok.NoArgsConstructor;
 
 /**
  * 容器内命令执行结果（内部使用）
+ * <p>
+ * 记录单次命令执行的完整结果信息，包括：
+ * - 执行状态（成功/失败/超时）
+ * - 标准输出和错误输出
+ * - 执行时间（毫秒级精度，从容器内 /proc 获取）
+ * - 内存使用（KB，从 /proc/self/status 的 VmRSS 获取）
+ * </p>
  *
  * @author ezzziy
  */
@@ -38,11 +45,18 @@ public class CommandResult {
 
     /**
      * 执行时间（毫秒）
+     * <p>
+     * 精确到毫秒级，从容器内 date +%s%N 获取的纳秒级时间戳计算得出
+     * </p>
      */
     private long executionTime;
 
     /**
      * 内存使用（KB）
+     * <p>
+     * 从容器内 /proc/self/status 的 VmRSS（Resident Set Size）字段获取，
+     * 表示实际占用的物理内存大小（KB）
+     * </p>
      */
     private long memoryUsage;
 
