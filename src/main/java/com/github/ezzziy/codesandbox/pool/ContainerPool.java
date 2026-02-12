@@ -1,6 +1,5 @@
 package com.github.ezzziy.codesandbox.pool;
 
-import com.github.dockerjava.api.DockerClient;
 import com.github.ezzziy.codesandbox.executor.ContainerManager;
 import com.github.ezzziy.codesandbox.strategy.LanguageStrategy;
 import lombok.RequiredArgsConstructor;
@@ -16,8 +15,10 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 容器池管理器 - 热容器机制
@@ -32,16 +33,15 @@ import java.util.concurrent.TimeUnit;
 @RequiredArgsConstructor
 public class ContainerPool {
 
-    private final DockerClient dockerClient;
     private final ContainerManager containerManager;
     private final List<LanguageStrategy> languageStrategies;
 
     /**
      * 容器池：按语言分组管理
      * Key: 语言名称（如 "java8", "python3"）
-     * Value: 该语言的容器列表
+    * Value: 该语言的容器池状态
      */
-    private final Map<String, CopyOnWriteArrayList<PooledContainer>> containerPool = new ConcurrentHashMap<>();
+    private final Map<String, PoolState> containerPool = new ConcurrentHashMap<>();
 
     @Value("${sandbox.pool.min-size:2}")
     private int minPoolSize;
@@ -55,23 +55,38 @@ public class ContainerPool {
     @Value("${sandbox.pool.max-use-count:100}")
     private int maxUseCount;
 
+    private static final int MIN_POOL_SIZE_FLOOR = 1;
+    private static final int ACQUIRE_WAIT_SECONDS = 30;
+    private static final int ZOMBIE_CHECK_DELAY_MILLIS = 10 * 60 * 1000;
+
+    private static class PoolState {
+        private final ConcurrentLinkedQueue<PooledContainer> containers = new ConcurrentLinkedQueue<>();
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition available = lock.newCondition();
+    }
+
     /**
      * 初始化容器池
      */
     @PostConstruct
     public void init() {
+        if (minPoolSize < MIN_POOL_SIZE_FLOOR) {
+            log.warn("minPoolSize 小于 1，已调整为 {}", MIN_POOL_SIZE_FLOOR);
+            minPoolSize = MIN_POOL_SIZE_FLOOR;
+        }
         log.info("初始化容器池: minSize={}, maxSize={}, maxIdleMinutes={}, maxUseCount={}",
                 minPoolSize, maxPoolSize, maxIdleMinutes, maxUseCount);
 
         // 为每种语言预热最小数量的容器
         for (LanguageStrategy strategy : languageStrategies) {
             String language = strategy.getLanguage().name();
-            containerPool.put(language, new CopyOnWriteArrayList<>());
+            PoolState state = new PoolState();
+            containerPool.put(language, state);
 
             // 预热容器
             for (int i = 0; i < minPoolSize; i++) {
                 try {
-                    createAndAddContainer(strategy);
+                    createAndAddContainer(strategy, state);
                 } catch (Exception e) {
                     log.error("预热容器失败: language={}", language, e);
                 }
@@ -85,70 +100,58 @@ public class ContainerPool {
      */
     public PooledContainer acquireContainer(LanguageStrategy strategy) {
         String language = strategy.getLanguage().name();
-        CopyOnWriteArrayList<PooledContainer> containers = containerPool.get(language);
+        PoolState state = getOrCreatePoolState(language);
+        LocalDateTime now = LocalDateTime.now();
 
-        if (containers == null) {
-            log.warn("未找到语言对应的容器池: {}", language);
-            containers = new CopyOnWriteArrayList<>();
-            containerPool.put(language, containers);
-        }
+        state.lock.lock();
+        try {
+            // 1. 优先获取空闲且存活的容器
+            PooledContainer container = findAvailableContainerLocked(state, now);
+            if (container != null) {
+                log.debug("从池中获取容器: language={}, containerId={}, useCount={}",
+                        language, container.getContainerId(), container.getUseCount());
+                return container;
+            }
 
-        // 1. 尝试获取空闲容器
-        for (PooledContainer container : containers) {
-            if (!container.isInUse()) {
-                synchronized (container) {
-                    if (!container.isInUse()) {
-                        container.setInUse(true);
-                        container.setLastUsedTime(LocalDateTime.now());
-                        container.setUseCount(container.getUseCount() + 1);
-                        log.debug("从池中获取容器: language={}, containerId={}, useCount={}",
-                                language, container.getContainerId(), container.getUseCount());
-                        return container;
-                    }
+            // 2. 没有空闲容器，检查是否可以创建新容器
+            if (state.containers.size() < maxPoolSize) {
+                try {
+                    PooledContainer newContainer = createAndAddContainer(strategy, state);
+                    newContainer.setInUse(true);
+                    newContainer.setLastUsedTime(now);
+                    newContainer.setUseCount(newContainer.getUseCount() + 1);
+                    log.info("创建新容器: language={}, containerId={}, poolSize={}",
+                            language, newContainer.getContainerId(), state.containers.size());
+                    return newContainer;
+                } catch (Exception e) {
+                    log.error("创建新容器失败: language={}", language, e);
+                    throw new RuntimeException("无法创建容器", e);
                 }
             }
-        }
 
-        // 2. 没有空闲容器，检查是否可以创建新容器
-        if (containers.size() < maxPoolSize) {
-            try {
-                PooledContainer newContainer = createAndAddContainer(strategy);
-                newContainer.setInUse(true);
-                log.info("创建新容器: language={}, containerId={}, poolSize={}",
-                        language, newContainer.getContainerId(), containers.size());
-                return newContainer;
-            } catch (Exception e) {
-                log.error("创建新容器失败: language={}", language, e);
-                throw new RuntimeException("无法创建容器", e);
-            }
-        }
-
-        // 3. 池已满，等待空闲容器
-        log.warn("容器池已满，等待空闲容器: language={}, poolSize={}", language, containers.size());
-        for (int i = 0; i < 30; i++) { // 最多等待 30 秒
-            try {
-                TimeUnit.SECONDS.sleep(1);
-                for (PooledContainer container : containers) {
-                    if (!container.isInUse()) {
-                        synchronized (container) {
-                            if (!container.isInUse()) {
-                                container.setInUse(true);
-                                container.setLastUsedTime(LocalDateTime.now());
-                                container.setUseCount(container.getUseCount() + 1);
-                                log.debug("等待后获取容器: language={}, containerId={}",
-                                        language, container.getContainerId());
-                                return container;
-                            }
-                        }
-                    }
+            // 3. 池已满，等待空闲容器
+            log.warn("容器池已满，等待空闲容器: language={}, poolSize={}", language, state.containers.size());
+            long nanos = TimeUnit.SECONDS.toNanos(ACQUIRE_WAIT_SECONDS);
+            while (nanos > 0) {
+                try {
+                    nanos = state.available.awaitNanos(nanos);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("等待容器被中断", e);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("等待容器被中断", e);
-            }
-        }
 
-        throw new RuntimeException("等待容器超时，所有容器都在使用中");
+                container = findAvailableContainerLocked(state, LocalDateTime.now());
+                if (container != null) {
+                    log.debug("等待后获取容器: language={}, containerId={}",
+                            language, container.getContainerId());
+                    return container;
+                }
+            }
+
+            throw new RuntimeException("等待容器超时，所有容器都在使用中");
+        } finally {
+            state.lock.unlock();
+        }
     }
 
     /**
@@ -163,24 +166,35 @@ public class ContainerPool {
         }
 
         String language = container.getStrategy().getLanguage().name();
+        PoolState state = getOrCreatePoolState(language);
 
-        // 检查容器是否需要重建（使用次数过多）
-        if (container.getUseCount() >= maxUseCount) {
-            log.info("容器使用次数达到上限，重建容器: language={}, containerId={}, useCount={}",
-                    language, container.getContainerId(), container.getUseCount());
-            removeAndRecreateContainer(container);
-            return;
-        }
+        state.lock.lock();
+        try {
+            if (!containerManager.isContainerRunning(container.getContainerId())) {
+                removeDeadContainerLocked(state, container, "release");
+                ensureAtLeastOneContainerLocked(state, container.getStrategy());
+                return;
+            }
 
-        // 任务子目录已由调用方清理，这里无需额外清理操作
+            // 检查容器是否需要重建（使用次数过多）
+            if (container.getUseCount() >= maxUseCount) {
+                log.info("容器使用次数达到上限，重建容器: language={}, containerId={}, useCount={}",
+                        language, container.getContainerId(), container.getUseCount());
+                removeAndRecreateContainerLocked(state, container);
+                return;
+            }
 
-        // 标记为空闲
-        synchronized (container) {
+            // 任务子目录已由调用方清理，这里无需额外清理操作
+
+            // 标记为空闲
             container.setInUse(false);
             container.setLastUsedTime(LocalDateTime.now());
+            state.available.signal();
+            log.debug("归还容器到池: language={}, containerId={}, useCount={}",
+                    language, container.getContainerId(), container.getUseCount());
+        } finally {
+            state.lock.unlock();
         }
-        log.debug("归还容器到池: language={}, containerId={}, useCount={}",
-                language, container.getContainerId(), container.getUseCount());
     }
 
     /**
@@ -189,7 +203,7 @@ public class ContainerPool {
      * 容器生命周期：create → start → verify running → ready
      * 沙箱镜像已内置 sandbox 用户和 /sandbox/workspace 目录，无需运行时初始化
      */
-    private PooledContainer createAndAddContainer(LanguageStrategy strategy) {
+    private PooledContainer createAndAddContainer(LanguageStrategy strategy, PoolState state) {
         String language = strategy.getLanguage().name();
         String image = strategy.getDockerImage();
         
@@ -245,7 +259,7 @@ public class ContainerPool {
                 0
         );
         
-        containerPool.get(language).add(pooledContainer);
+        state.containers.add(pooledContainer);
 
         return pooledContainer;
     }
@@ -253,17 +267,16 @@ public class ContainerPool {
     /**
      * 移除并重建容器
      */
-    private void removeAndRecreateContainer(PooledContainer oldContainer) {
+    private void removeAndRecreateContainerLocked(PoolState state, PooledContainer oldContainer) {
         String language = oldContainer.getStrategy().getLanguage().name();
-        CopyOnWriteArrayList<PooledContainer> containers = containerPool.get(language);
 
         try {
             // 移除旧容器
             containerManager.removeContainer(oldContainer.getContainerId());
-            containers.remove(oldContainer);
+            state.containers.remove(oldContainer);
 
             // 创建新容器
-            createAndAddContainer(oldContainer.getStrategy());
+            createAndAddContainer(oldContainer.getStrategy(), state);
         } catch (Exception e) {
             log.error("重建容器失败: language={}, oldContainerId={}",
                     language, oldContainer.getContainerId(), e);
@@ -277,37 +290,69 @@ public class ContainerPool {
     public void cleanIdleContainers() {
         LocalDateTime now = LocalDateTime.now();
 
-        for (Map.Entry<String, CopyOnWriteArrayList<PooledContainer>> entry : containerPool.entrySet()) {
+        for (Map.Entry<String, PoolState> entry : containerPool.entrySet()) {
             String language = entry.getKey();
-            CopyOnWriteArrayList<PooledContainer> containers = entry.getValue();
+            PoolState state = entry.getValue();
 
-            // 保留最小数量的容器
-            int idleCount = (int) containers.stream().filter(c -> !c.isInUse()).count();
-            int canRemoveCount = idleCount - minPoolSize;
-
-            if (canRemoveCount <= 0) {
-                continue;
-            }
-
-            for (PooledContainer container : containers) {
-                if (canRemoveCount <= 0) {
-                    break;
+            state.lock.lock();
+            try {
+                int minKeep = Math.max(minPoolSize, MIN_POOL_SIZE_FLOOR);
+                int totalCount = state.containers.size();
+                if (totalCount <= minKeep) {
+                    continue;
                 }
 
-                if (!container.isInUse()) {
-                    long idleMinutes = ChronoUnit.MINUTES.between(container.getLastUsedTime(), now);
-                    if (idleMinutes >= maxIdleMinutes) {
-                        log.info("清理空闲超时容器: language={}, containerId={}, idleMinutes={}",
-                                language, container.getContainerId(), idleMinutes);
-                        try {
-                            containerManager.removeContainer(container.getContainerId());
-                            containers.remove(container);
-                            canRemoveCount--;
-                        } catch (Exception e) {
-                            log.error("清理容器失败: containerId={}", container.getContainerId(), e);
+                for (PooledContainer container : state.containers) {
+                    if (state.containers.size() <= minKeep) {
+                        break;
+                    }
+
+                    if (!container.isInUse()) {
+                        long idleMinutes = ChronoUnit.MINUTES.between(container.getLastUsedTime(), now);
+                        if (idleMinutes >= maxIdleMinutes) {
+                            log.info("清理空闲超时容器: language={}, containerId={}, idleMinutes={}",
+                                    language, container.getContainerId(), idleMinutes);
+                            try {
+                                containerManager.removeContainer(container.getContainerId());
+                                state.containers.remove(container);
+                            } catch (Exception e) {
+                                log.error("清理容器失败: containerId={}", container.getContainerId(), e);
+                            }
                         }
                     }
                 }
+            } finally {
+                state.lock.unlock();
+            }
+        }
+    }
+
+    /**
+     * 定时检查僵尸容器并修复池
+     */
+    @Scheduled(fixedDelay = ZOMBIE_CHECK_DELAY_MILLIS)
+    public void cleanZombieContainers() {
+        for (Map.Entry<String, PoolState> entry : containerPool.entrySet()) {
+            String language = entry.getKey();
+            PoolState state = entry.getValue();
+
+            state.lock.lock();
+            try {
+                for (PooledContainer container : state.containers) {
+                    if (!containerManager.isContainerRunning(container.getContainerId())) {
+                        removeDeadContainerLocked(state, container, "scheduled");
+                    }
+                }
+
+                if (state.containers.isEmpty()) {
+                    LanguageStrategy strategy = findStrategyByLanguage(language);
+                    if (strategy != null) {
+                        log.warn("所有容器均已失效，重建一个容器: language={}", language);
+                        createAndAddContainer(strategy, state);
+                    }
+                }
+            } finally {
+                state.lock.unlock();
             }
         }
     }
@@ -318,19 +363,24 @@ public class ContainerPool {
     @PreDestroy
     public void destroy() {
         log.info("销毁容器池");
-        for (Map.Entry<String, CopyOnWriteArrayList<PooledContainer>> entry : containerPool.entrySet()) {
+        for (Map.Entry<String, PoolState> entry : containerPool.entrySet()) {
             String language = entry.getKey();
-            CopyOnWriteArrayList<PooledContainer> containers = entry.getValue();
+            PoolState state = entry.getValue();
 
-            for (PooledContainer container : containers) {
-                try {
-                    containerManager.removeContainer(container.getContainerId());
-                    log.debug("销毁容器: language={}, containerId={}", language, container.getContainerId());
-                } catch (Exception e) {
-                    log.error("销毁容器失败: containerId={}", container.getContainerId(), e);
+            state.lock.lock();
+            try {
+                for (PooledContainer container : state.containers) {
+                    try {
+                        containerManager.removeContainer(container.getContainerId());
+                        log.debug("销毁容器: language={}, containerId={}", language, container.getContainerId());
+                    } catch (Exception e) {
+                        log.error("销毁容器失败: containerId={}", container.getContainerId(), e);
+                    }
                 }
+                state.containers.clear();
+            } finally {
+                state.lock.unlock();
             }
-            containers.clear();
         }
         containerPool.clear();
     }
@@ -341,20 +391,69 @@ public class ContainerPool {
     public Map<String, Map<String, Object>> getPoolStats() {
         Map<String, Map<String, Object>> stats = new ConcurrentHashMap<>();
 
-        for (Map.Entry<String, CopyOnWriteArrayList<PooledContainer>> entry : containerPool.entrySet()) {
+        for (Map.Entry<String, PoolState> entry : containerPool.entrySet()) {
             String language = entry.getKey();
-            CopyOnWriteArrayList<PooledContainer> containers = entry.getValue();
+            PoolState state = entry.getValue();
 
-            long inUseCount = containers.stream().filter(PooledContainer::isInUse).count();
-            long idleCount = containers.stream().filter(c -> !c.isInUse()).count();
+            state.lock.lock();
+            try {
+                long inUseCount = state.containers.stream().filter(PooledContainer::isInUse).count();
+                long idleCount = state.containers.stream().filter(c -> !c.isInUse()).count();
 
-            stats.put(language, Map.of(
-                    "total", containers.size(),
-                    "inUse", inUseCount,
-                    "idle", idleCount
-            ));
+                stats.put(language, Map.of(
+                        "total", state.containers.size(),
+                        "inUse", inUseCount,
+                        "idle", idleCount
+                ));
+            } finally {
+                state.lock.unlock();
+            }
         }
 
         return stats;
+    }
+
+    private PoolState getOrCreatePoolState(String language) {
+        return containerPool.computeIfAbsent(language, key -> new PoolState());
+    }
+
+    private PooledContainer findAvailableContainerLocked(PoolState state, LocalDateTime now) {
+        for (PooledContainer container : state.containers) {
+            if (container.isInUse()) {
+                continue;
+            }
+
+            if (!containerManager.isContainerRunning(container.getContainerId())) {
+                removeDeadContainerLocked(state, container, "acquire");
+                continue;
+            }
+
+            container.setInUse(true);
+            container.setLastUsedTime(now);
+            container.setUseCount(container.getUseCount() + 1);
+            return container;
+        }
+        return null;
+    }
+
+    private void removeDeadContainerLocked(PoolState state, PooledContainer container, String reason) {
+        log.warn("清理僵尸容器: containerId={}, reason={}", container.getContainerId(), reason);
+        state.containers.remove(container);
+        containerManager.removeContainer(container.getContainerId());
+    }
+
+    private void ensureAtLeastOneContainerLocked(PoolState state, LanguageStrategy strategy) {
+        if (state.containers.isEmpty()) {
+            createAndAddContainer(strategy, state);
+        }
+    }
+
+    private LanguageStrategy findStrategyByLanguage(String language) {
+        for (LanguageStrategy strategy : languageStrategies) {
+            if (strategy.getLanguage().name().equals(language)) {
+                return strategy;
+            }
+        }
+        return null;
     }
 }

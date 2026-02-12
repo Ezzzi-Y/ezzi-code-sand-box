@@ -65,12 +65,6 @@ sandbox:
     # 最大并发容器数（启用容器池时需要足够大，建议 = 语言数 × pool.max-size）
     max-concurrent-containers: 50
 
-  # 缓存配置
-  cache:
-    # 最大缓存条目数
-    max-size: 5000
-    # 缓存过期时间（分钟）
-    expire-minutes: 60
 
   # 输入数据配置
   input-data:
