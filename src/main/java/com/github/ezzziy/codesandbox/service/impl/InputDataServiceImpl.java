@@ -11,9 +11,12 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,6 +40,8 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class InputDataServiceImpl implements InputDataService {
 
+    private static final String META_FILE_NAME = "_meta.properties";
+
     @Value("${sandbox.input-data.storage-dir:/var/lib/sandbox-inputs}")
     private String storageDir;
 
@@ -50,6 +55,11 @@ public class InputDataServiceImpl implements InputDataService {
      * 匹配输入文件名的正则：数字.in
      */
     private static final Pattern INPUT_FILE_PATTERN = Pattern.compile("^(\\d+)\\.in$");
+
+    /**
+     * 匹配输出文件名的正则：数字.out
+     */
+    private static final Pattern OUTPUT_FILE_PATTERN = Pattern.compile("^(\\d+)\\.out$");
 
     /**
      * 从预签名 URL 获取输入数据集
@@ -66,14 +76,26 @@ public class InputDataServiceImpl implements InputDataService {
         String objectKey = OssUrlParser.extractObjectKey(presignedUrl);
         log.debug("从 URL 提取 ObjectKey: {}", objectKey);
 
+        RemoteObjectMeta remoteMeta = fetchRemoteMeta(presignedUrl);
+
         Path localDir = getLocalStoragePath(objectKey);
         if (Files.exists(localDir)) {
-            log.info("本地磁盘已存在，跳过下载: {}", localDir);
-            return loadFromLocalDisk(objectKey, localDir);
+            RemoteObjectMeta localMeta = readLocalMeta(localDir);
+            if (isSameVersion(localMeta, remoteMeta)) {
+                log.info("远端版本未变化，复用本地缓存: objectKey={}, etag={}, lastModified={}",
+                        objectKey, remoteMeta.etag(), remoteMeta.lastModified());
+                return loadFromLocalDisk(objectKey, localDir);
+            }
+
+            log.info("远端版本已变化，准备重新拉取: objectKey={}, localEtag={}, remoteEtag={}",
+                    objectKey,
+                    localMeta != null ? localMeta.etag() : null,
+                    remoteMeta.etag());
+            deleteDirectory(localDir);
         }
 
-        log.info("本地磁盘不存在，开始下载: objectKey={}", objectKey);
-        return downloadAndSaveToDisk(objectKey, presignedUrl);
+        log.info("开始下载输入数据: objectKey={}", objectKey);
+        return downloadAndSaveToDisk(objectKey, presignedUrl, remoteMeta);
     }
 
     /**
@@ -96,6 +118,7 @@ public class InputDataServiceImpl implements InputDataService {
         return InputDataSet.builder()
                 .dataId(null)
                 .inputs(Collections.singletonList(input != null ? input : ""))
+                .expectedOutputs(Collections.emptyList())
                 .build();
     }
 
@@ -109,22 +132,7 @@ public class InputDataServiceImpl implements InputDataService {
      */
     public void evictByObjectKey(String objectKey) {
         Path localDir = getLocalStoragePath(objectKey);
-        try {
-            if (Files.exists(localDir)) {
-                Files.walk(localDir)
-                        .sorted((a, b) -> -a.compareTo(b))
-                        .forEach(path -> {
-                            try {
-                                Files.delete(path);
-                            } catch (IOException e) {
-                                log.warn("删除文件失败: {}", path, e);
-                            }
-                        });
-                log.info("已删除本地数据: {}", localDir);
-            }
-        } catch (IOException e) {
-            log.error("删除本地数据失败: objectKey={}", objectKey, e);
-        }
+        deleteDirectory(localDir);
     }
 
     /**
@@ -151,30 +159,41 @@ public class InputDataServiceImpl implements InputDataService {
     private InputDataSet loadFromLocalDisk(String objectKey, Path localDir) {
         try {
             TreeMap<Integer, String> inputMap = new TreeMap<>();
+            TreeMap<Integer, String> outputMap = new TreeMap<>();
             
             Files.list(localDir)
                     .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".in"))
                     .forEach(path -> {
                         String fileName = path.getFileName().toString();
-                        Matcher matcher = INPUT_FILE_PATTERN.matcher(fileName);
-                        if (matcher.matches()) {
-                            int index = Integer.parseInt(matcher.group(1));
-                            try {
-                                String content = Files.readString(path, StandardCharsets.UTF_8);
+                        Matcher inputMatcher = INPUT_FILE_PATTERN.matcher(fileName);
+                        Matcher outputMatcher = OUTPUT_FILE_PATTERN.matcher(fileName);
+                        try {
+                            String content = Files.readString(path, StandardCharsets.UTF_8);
+                            if (inputMatcher.matches()) {
+                                int index = Integer.parseInt(inputMatcher.group(1));
                                 inputMap.put(index, content);
-                            } catch (IOException e) {
-                                log.error("读取输入文件失败: {}", path, e);
+                            } else if (outputMatcher.matches()) {
+                                int index = Integer.parseInt(outputMatcher.group(1));
+                                outputMap.put(index, content);
                             }
+                        } catch (IOException e) {
+                            log.error("读取测试用例文件失败: {}", path, e);
                         }
                     });
 
+            validateCasePairs(inputMap, outputMap);
+
             List<String> inputs = new ArrayList<>(inputMap.values());
+            List<String> outputs = new ArrayList<>();
+            for (Integer index : inputMap.keySet()) {
+                outputs.add(outputMap.get(index));
+            }
             log.info("从本地磁盘加载输入数据: objectKey={}, count={}", objectKey, inputs.size());
 
             return InputDataSet.builder()
                     .dataId(objectKey)
                     .inputs(inputs)
+                    .expectedOutputs(outputs)
                     .build();
 
         } catch (IOException e) {
@@ -186,7 +205,7 @@ public class InputDataServiceImpl implements InputDataService {
     /**
      * 下载并保存到本地磁盘
      */
-    private InputDataSet downloadAndSaveToDisk(String objectKey, String presignedUrl) {
+    private InputDataSet downloadAndSaveToDisk(String objectKey, String presignedUrl, RemoteObjectMeta remoteMeta) {
         try {
             byte[] zipBytes = HttpUtil.downloadBytes(presignedUrl);
 
@@ -203,21 +222,31 @@ public class InputDataServiceImpl implements InputDataService {
             Path localDir = getLocalStoragePath(objectKey);
             Files.createDirectories(localDir);
 
-            TreeMap<Integer, String> inputMap = extractAndSaveToDisk(zipBytes, localDir);
+                ExtractedCases extractedCases = extractAndSaveToDisk(zipBytes, localDir);
+                TreeMap<Integer, String> inputMap = extractedCases.inputs();
+                TreeMap<Integer, String> outputMap = extractedCases.outputs();
 
             if (inputMap.isEmpty()) {
                 throw new RuntimeException("输入数据包中没有有效的输入文件（需要 1.in, 2.in... 格式）");
             }
 
+                validateCasePairs(inputMap, outputMap);
+
             setPermissions(localDir);
+                writeLocalMeta(localDir, remoteMeta);
 
             List<String> inputs = new ArrayList<>(inputMap.values());
+                List<String> outputs = new ArrayList<>();
+                for (Integer index : inputMap.keySet()) {
+                outputs.add(outputMap.get(index));
+                }
             log.info("输入数据已下载到本地: objectKey={}, path={}, count={}", 
                     objectKey, localDir, inputs.size());
 
             return InputDataSet.builder()
                     .dataId(objectKey)
                     .inputs(inputs)
+                    .expectedOutputs(outputs)
                     .build();
 
         } catch (Exception e) {
@@ -226,14 +255,126 @@ public class InputDataServiceImpl implements InputDataService {
         }
     }
 
+    private RemoteObjectMeta fetchRemoteMeta(String presignedUrl) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(presignedUrl);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("HEAD");
+            connection.setConnectTimeout(downloadTimeout);
+            connection.setReadTimeout(downloadTimeout);
+            connection.connect();
+
+            int statusCode = connection.getResponseCode();
+            if (statusCode < 200 || statusCode >= 400) {
+                throw new RuntimeException("查询远端对象元数据失败，HTTP 状态码: " + statusCode);
+            }
+
+            String etag = trimHeader(connection.getHeaderField("ETag"));
+            String lastModified = trimHeader(connection.getHeaderField("Last-Modified"));
+
+            return new RemoteObjectMeta(etag, lastModified);
+        } catch (Exception e) {
+            throw new RuntimeException("获取远端对象元数据失败: " + e.getMessage(), e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private boolean isSameVersion(RemoteObjectMeta localMeta, RemoteObjectMeta remoteMeta) {
+        if (localMeta == null || remoteMeta == null) {
+            return false;
+        }
+        if (localMeta.etag() != null && remoteMeta.etag() != null) {
+            return Objects.equals(localMeta.etag(), remoteMeta.etag());
+        }
+        if (localMeta.lastModified() != null && remoteMeta.lastModified() != null) {
+            return Objects.equals(localMeta.lastModified(), remoteMeta.lastModified());
+        }
+        return false;
+    }
+
+    private void writeLocalMeta(Path localDir, RemoteObjectMeta remoteMeta) {
+        if (remoteMeta == null) {
+            return;
+        }
+        Properties properties = new Properties();
+        if (remoteMeta.etag() != null) {
+            properties.setProperty("etag", remoteMeta.etag());
+        }
+        if (remoteMeta.lastModified() != null) {
+            properties.setProperty("lastModified", remoteMeta.lastModified());
+        }
+        properties.setProperty("updatedAt", String.valueOf(System.currentTimeMillis()));
+
+        Path metaFile = localDir.resolve(META_FILE_NAME);
+        try (var writer = Files.newBufferedWriter(metaFile, StandardCharsets.UTF_8)) {
+            properties.store(writer, "sandbox input cache metadata");
+        } catch (IOException e) {
+            log.warn("写入本地元数据失败: {}", metaFile, e);
+        }
+    }
+
+    private RemoteObjectMeta readLocalMeta(Path localDir) {
+        Path metaFile = localDir.resolve(META_FILE_NAME);
+        if (!Files.exists(metaFile)) {
+            return null;
+        }
+        Properties properties = new Properties();
+        try (BufferedReader reader = Files.newBufferedReader(metaFile, StandardCharsets.UTF_8)) {
+            properties.load(reader);
+            return new RemoteObjectMeta(
+                    trimHeader(properties.getProperty("etag")),
+                    trimHeader(properties.getProperty("lastModified"))
+            );
+        } catch (IOException e) {
+            log.warn("读取本地元数据失败: {}", metaFile, e);
+            return null;
+        }
+    }
+
+    private String trimHeader(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private void deleteDirectory(Path localDir) {
+        try {
+            if (!Files.exists(localDir)) {
+                return;
+            }
+            Files.walk(localDir)
+                    .sorted((a, b) -> -a.compareTo(b))
+                    .forEach(path -> {
+                        try {
+                            Files.delete(path);
+                        } catch (IOException e) {
+                            log.warn("删除文件失败: {}", path, e);
+                        }
+                    });
+            log.info("已删除本地数据: {}", localDir);
+        } catch (IOException e) {
+            log.error("删除本地数据失败: path={}", localDir, e);
+        }
+    }
+
+    private record RemoteObjectMeta(String etag, String lastModified) {
+    }
+
     /**
      * 从 ZIP 压缩包中提取输入文件并保存到磁盘
      * <p>
      * 按文件名序号排序（1.in, 2.in, 3.in...）
      * </p>
      */
-    private TreeMap<Integer, String> extractAndSaveToDisk(byte[] zipBytes, Path targetDir) throws IOException {
+    private ExtractedCases extractAndSaveToDisk(byte[] zipBytes, Path targetDir) throws IOException {
         TreeMap<Integer, String> inputMap = new TreeMap<>();
+        TreeMap<Integer, String> outputMap = new TreeMap<>();
 
         try (ZipArchiveInputStream zis = new ZipArchiveInputStream(
                 new ByteArrayInputStream(zipBytes), StandardCharsets.UTF_8.name())) {
@@ -250,9 +391,10 @@ public class InputDataServiceImpl implements InputDataService {
                     fileName = fileName.substring(lastSlash + 1);
                 }
 
-                Matcher matcher = INPUT_FILE_PATTERN.matcher(fileName);
-                if (matcher.matches()) {
-                    int index = Integer.parseInt(matcher.group(1));
+                Matcher inputMatcher = INPUT_FILE_PATTERN.matcher(fileName);
+                Matcher outputMatcher = OUTPUT_FILE_PATTERN.matcher(fileName);
+                if (inputMatcher.matches() || outputMatcher.matches()) {
+                    int index = Integer.parseInt((inputMatcher.matches() ? inputMatcher : outputMatcher).group(1));
 
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[4096];
@@ -262,7 +404,11 @@ public class InputDataServiceImpl implements InputDataService {
                     }
 
                     String content = baos.toString(StandardCharsets.UTF_8);
-                    inputMap.put(index, content);
+                    if (inputMatcher.matches()) {
+                        inputMap.put(index, content);
+                    } else {
+                        outputMap.put(index, content);
+                    }
 
                     Path targetFile = targetDir.resolve(fileName);
                     Files.writeString(targetFile, content, StandardCharsets.UTF_8);
@@ -272,7 +418,23 @@ public class InputDataServiceImpl implements InputDataService {
             }
         }
 
-        return inputMap;
+        return new ExtractedCases(inputMap, outputMap);
+    }
+
+    private void validateCasePairs(TreeMap<Integer, String> inputMap, TreeMap<Integer, String> outputMap) {
+        if (inputMap.isEmpty()) {
+            return;
+        }
+        if (outputMap.isEmpty()) {
+            throw new RuntimeException("测试用例 ZIP 格式错误：缺少 *.out 文件");
+        }
+
+        if (!inputMap.keySet().equals(outputMap.keySet())) {
+            throw new RuntimeException("测试用例 ZIP 格式错误：*.in 与 *.out 必须按相同编号成对出现");
+        }
+    }
+
+    private record ExtractedCases(TreeMap<Integer, String> inputs, TreeMap<Integer, String> outputs) {
     }
 
     /**
@@ -300,13 +462,4 @@ public class InputDataServiceImpl implements InputDataService {
         }
     }
 
-    /**
-     * 隐藏 URL 中的敏感信息（用于日志）
-     */
-    private String maskUrl(String url) {
-        if (url == null || url.length() < 50) {
-            return url;
-        }
-        return url.substring(0, 50) + "...";
-    }
 }

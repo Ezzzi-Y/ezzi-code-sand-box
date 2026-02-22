@@ -1,7 +1,9 @@
 package com.github.ezzziy.codesandbox.service;
 
-import com.github.ezzziy.codesandbox.model.dto.ExecuteRequest;
-import com.github.ezzziy.codesandbox.model.vo.ExecuteResponse;
+import com.github.ezzziy.codesandbox.model.dto.BatchExecuteRequest;
+import com.github.ezzziy.codesandbox.model.dto.SingleExecuteRequest;
+import com.github.ezzziy.codesandbox.model.vo.BatchExecuteResponse;
+import com.github.ezzziy.codesandbox.model.vo.SingleExecuteResponse;
 
 import java.util.List;
 
@@ -33,7 +35,15 @@ public interface ExecutionService {
      * @param request 执行请求，包含代码、语言、输入等
      * @return 执行结果，包含编译输出和所有测试用例的执行结果
      */
-    ExecuteResponse execute(ExecuteRequest request);
+    SingleExecuteResponse executeSingle(SingleExecuteRequest request);
+
+    /**
+     * 批量执行代码（多测试用例）
+     *
+     * @param request 批量执行请求
+     * @return 批量执行结果
+     */
+    BatchExecuteResponse executeBatch(BatchExecuteRequest request);
 
     /**
      * 获取系统支持的所有编程语言

@@ -6,10 +6,8 @@
 
 | 接口 | 方法 | 路径 | 描述 |
 |------|------|------|------|
-| 执行代码 | POST | `/execute` | 执行用户代码并返回结果 |
+| 单次执行 | POST | `/execute/single` | 执行单个输入并返回结果 |
 | 批量执行 | POST | `/execute/batch` | 批量执行多个测试用例 |
-| 刷新缓存 | POST | `/cache/refresh` | 刷新指定输入数据的缓存 |
-| 清空缓存 | DELETE | `/cache/clear` | 清空所有缓存 |
 | 健康检查 | GET | `/health` | 服务健康状态 |
 | 语言支持 | GET | `/languages` | 获取支持的语言列表 |
 
@@ -29,26 +27,23 @@
 
 ## 2. 核心接口设计
 
-### 2.1 执行代码接口
+### 2.1 单次执行接口
 
 #### 请求
 
 ```http
-POST /execute
+POST /execute/single
 Content-Type: application/json
 X-Request-ID: uuid
 ```
 
 ```json
 {
-  "language": "cpp",
-  "languageVersion": "11",
+  "language": "cpp11",
   "code": "#include <iostream>\nusing namespace std;\nint main() {\n    int a, b;\n    cin >> a >> b;\n    cout << a + b << endl;\n    return 0;\n}",
-  "questionId": "1001",
-  "testCaseUrl": "https://minio.example.com/testcases/1001.zip?X-Amz-Signature=...",
+  "input": "1 2",
   "timeLimit": 1000,
-  "memoryLimit": 256,
-  "enableNetwork": false
+  "memoryLimit": 256
 }
 ```
 
@@ -56,18 +51,11 @@ X-Request-ID: uuid
 
 | 字段 | 类型 | 必填 | 描述 |
 |------|------|------|------|
-| `language` | String | ✅ | 编程语言：`c`, `cpp`, `java`, `python`, `golang` |
-| `languageVersion` | String | ❌ | 语言版本：Java 为 `8`/`11`，C++ 为 `11`/`17` |
+| `language` | String | ✅ | 编程语言：`c`, `cpp11`, `java8`, `java17`, `python3` |
 | `code` | String | ✅ | 用户源代码（Base64 或明文） |
-| `questionId` | String | ✅ | 题目 ID，用于缓存标识 |
-| `testCaseUrl` | String | ❌ | 测试用例预签名下载 URL（由主服务生成）|
-| `inputList` | List | ❌ | 直接传入的输入列表（与 testCaseUrl 二选一）|
-| `expectedOutputList` | List | ❌ | 直接传入的期望输出列表 |
+| `input` | String | ❌ | 直接输入内容，单次接口仅支持直接输入 |
 | `timeLimit` | Integer | ❌ | 时间限制（毫秒），默认 5000，最大 30000 |
 | `memoryLimit` | Integer | ❌ | 内存限制（MB），默认 256，最大 512 |
-| `enableNetwork` | Boolean | ❌ | 是否启用网络（默认 false，强烈建议禁用）|
-
-> **说明**: `testCaseUrl` 是由 OJ 主服务（backend-tyut-oj）生成的预签名 URL，沙箱通过此 URL 下载测试用例文件。沙箱本身不连接 OSS，降低了部署复杂度和安全风险。
 
 #### 响应
 
@@ -76,23 +64,19 @@ X-Request-ID: uuid
   "code": 200,
   "message": "success",
   "data": {
-    "status": "ACCEPTED",
-    "compileResult": {
-      "success": true,
-      "output": "",
+    "status": "SUCCESS",
+    "compileOutput": null,
+    "errorMessage": null,
+    "result": {
+      "index": 1,
+      "status": "SUCCESS",
+      "output": "3",
       "errorOutput": "",
-      "timeUsed": 1234
+      "time": 15,
+      "memory": 2048,
+      "exitCode": 0
     },
-    "runResult": {
-      "stdout": "3\n",
-      "stderr": "",
-      "exitCode": 0,
-      "timeUsed": 15,
-      "memoryUsed": 2048,
-      "signal": null
-    },
-    "executionId": "exec-uuid-123",
-    "totalTime": 1500
+    "totalTime": 32
   },
   "timestamp": 1706889600000,
   "traceId": "trace-uuid-456"
@@ -226,38 +210,12 @@ Content-Type: application/json
 
 ---
 
-### 2.3 缓存刷新接口
+### 2.3 输入数据缓存（批量 URL 模式）
 
-#### 请求
-
-```http
-POST /cache/refresh
-Content-Type: application/json
-```
-
-```json
-{
-  "objectKeys": [
-    "questions/1001/testcases/1.in",
-    "questions/1001/testcases/2.in"
-  ],
-  "forceDownload": true
-}
-```
-
-#### 响应
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "refreshed": 2,
-    "failed": 0,
-    "details": [
-      {
-        "objectKey": "questions/1001/testcases/1.in",
-        "success": true,
+- 批量执行时如果使用 `inputDataUrl`，服务会在每次执行前发起元数据查询。
+- 使用 `ETag` 和 `Last-Modified` 与本地缓存元数据比对。
+- 一致则使用本地缓存，不一致则重新下载并覆盖。
+- 不再提供手动触发缓存更新的 API。
         "message": "refreshed"
       },
       {
@@ -399,11 +357,16 @@ public enum ExecutionStatus {
     
     // 成功状态
     ACCEPTED("AC", "执行成功"),
-    
+  "inputDataUrl": "https://example.com/testcases.zip?sign=...",
     // 编译相关
     COMPILE_ERROR("CE", "编译错误"),
     
     // 运行时错误
+
+批量接口约束：
+- 仅支持传入一个 `inputDataUrl`。
+- 不支持直接传入输入列表。
+- URL 指向 zip 文件，且 zip 必须包含成对的 `n.in` 与 `n.out` 文件。
     RUNTIME_ERROR("RE", "运行时错误"),
     TIME_LIMIT_EXCEEDED("TLE", "超时"),
     MEMORY_LIMIT_EXCEEDED("MLE", "内存超限"),

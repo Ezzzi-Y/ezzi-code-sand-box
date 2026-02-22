@@ -106,9 +106,9 @@ sandbox:
 
 ## 🔌 API 使用
 
-### 执行代码 (HTTP)
+### 单次执行代码 (HTTP)
 
-**接口地址**: `POST /sandbox/api/execute`
+**接口地址**: `POST /sandbox/api/execute/single`
 
 **请求示例**:
 ```json
@@ -125,14 +125,84 @@ sandbox:
 **响应示例**:
 ```json
 {
-  "status": "SUCCESS",
-  "exitCode": 0,
-  "output": "30\n",
-  "errorMessage": null,
-  "timeCost": 35,
-  "memoryCost": 6204
+  "code": 1,
+  "message": "success",
+  "data": {
+    "status": "SUCCESS",
+    "compileOutput": null,
+    "errorMessage": null,
+    "result": {
+      "index": 1,
+      "status": "SUCCESS",
+      "output": "30",
+      "errorOutput": "",
+      "time": 35,
+      "memory": 6204,
+      "exitCode": 0
+    },
+    "totalTime": 45
+  }
 }
 ```
+
+### 批量执行代码 (HTTP)
+
+**接口地址**: `POST /sandbox/api/execute/batch`
+
+**请求示例**:
+```json
+{
+  "requestId": "test-req-002",
+  "language": "python3",
+  "code": "print(sum(map(int, input().split())))",
+  "inputDataUrl": "https://example.com/testcases.zip?sign=...",
+  "timeLimit": 1000,
+  "memoryLimit": 256
+}
+```
+
+**约束说明**:
+- 批量执行只支持 `inputDataUrl`，不支持直接传入输入列表。
+- `inputDataUrl` 必须指向 zip 文件。
+- zip 内文件必须成对出现：`1.in,1.out,2.in,2.out...`。
+
+**响应示例**:
+```json
+{
+  "code": 1,
+  "message": "success",
+  "data": {
+    "status": "SUCCESS",
+    "compileOutput": null,
+    "errorMessage": null,
+    "results": [
+      {
+        "index": 1,
+        "status": "SUCCESS",
+        "output": "3",
+        "errorOutput": "",
+        "time": 12,
+        "memory": 2000,
+        "exitCode": 0
+      }
+    ],
+    "summary": {
+      "total": 3,
+      "success": 3,
+      "failed": 0
+    },
+    "totalTime": 82
+  }
+}
+```
+
+### 输入数据缓存策略
+
+- 当批量请求使用 `inputDataUrl` 时，服务在每次执行前先请求远端对象元数据。
+- 以 `ETag` 与 `Last-Modified` 与本地缓存元数据比较：
+  - 一致：直接使用本地缓存。
+  - 不一致：重新下载并覆盖本地缓存。
+- 不再提供手动触发的缓存更新接口。
 
 ## 🏗 系统架构
 

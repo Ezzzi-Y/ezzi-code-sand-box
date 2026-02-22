@@ -1,13 +1,15 @@
 package com.github.ezzziy.codesandbox.service.impl;
 
 import com.github.ezzziy.codesandbox.config.ExecutionConfig;
+import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
+import com.github.ezzziy.codesandbox.model.dto.BatchExecuteRequest;
 import com.github.ezzziy.codesandbox.exception.CompileException;
 import com.github.ezzziy.codesandbox.exception.DangerousCodeException;
 import com.github.ezzziy.codesandbox.executor.DockerCodeExecutor;
-import com.github.ezzziy.codesandbox.model.dto.ExecuteRequest;
 import com.github.ezzziy.codesandbox.model.dto.InputDataSet;
-import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
-import com.github.ezzziy.codesandbox.model.vo.ExecuteResponse;
+import com.github.ezzziy.codesandbox.model.dto.SingleExecuteRequest;
+import com.github.ezzziy.codesandbox.model.vo.BatchExecuteResponse;
+import com.github.ezzziy.codesandbox.model.vo.SingleExecuteResponse;
 import com.github.ezzziy.codesandbox.service.ExecutionService;
 import com.github.ezzziy.codesandbox.service.InputDataService;
 import com.github.ezzziy.codesandbox.strategy.LanguageStrategy;
@@ -16,6 +18,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -37,63 +41,28 @@ public class ExecutionServiceImpl implements ExecutionService {
     private final ExecutionConfig executionConfig;
     private final InputDataService inputDataService;
 
-    /**
-     * 执行用户代码
-     * <p>
-     * 完整执行流程：
-     * 1. 为请求分配唯一 ID（如果未提供）
-     * 2. 验证编程语言是否支持
-     * 3. 获取输入数据（直接输入或从 URL 下载）
-     * 4. 编译代码（需要编译的语言）
-     * 5. 逐一执行测试用例，收集结果
-     * 
-     * 异常处理：
-     * - CompileException: 编译错误 → COMPILE_ERROR
-     * - DangerousCodeException: 检测到危险代码 → DANGEROUS_CODE
-     * - IllegalArgumentException: 参数验证失败 → SYSTEM_ERROR
-     * - 其他异常: 系统错误 → SYSTEM_ERROR
-     * </p>
-     *
-     * @param request 执行请求，包含代码、语言、输入、时间/内存限制
-     * @return 执行响应，包含编译输出和所有测试用例结果
-     */
-    public ExecuteResponse execute(ExecuteRequest request) {
+    public SingleExecuteResponse executeSingle(SingleExecuteRequest request) {
         String requestId = request.getRequestId();
         if (requestId == null || requestId.isBlank()) {
             requestId = UUID.randomUUID().toString().substring(0, 8);
         }
 
-        log.info("开始执行代码: requestId={}, language={}", requestId, request.getLanguage());
+        log.info("开始单次执行代码: requestId={}, language={}", requestId, request.getLanguage());
 
         long startTime = System.currentTimeMillis();
-        long compileTime = 0L;
-        long runTime = 0L;
 
         try {
             if (!strategyFactory.isSupported(request.getLanguage())) {
-                return ExecuteResponse.builder()
+                return SingleExecuteResponse.builder()
                         .status(ExecutionStatus.SYSTEM_ERROR)
                         .errorMessage("不支持的编程语言: " + request.getLanguage())
                         .build();
             }
+
             LanguageStrategy strategy = strategyFactory.getStrategy(request.getLanguage());
 
-            InputDataSet inputDataSet = getInputDataSet(request);
-            List<String> inputList = inputDataSet.getInputs();
-
-            if (inputList.isEmpty()) {
-                inputDataSet = inputDataService.wrapSingleInput("");
-                inputList = inputDataSet.getInputs();
-            }
-
-            if (inputList.size() > executionConfig.getMaxTestCases()) {
-                return ExecuteResponse.builder()
-                        .status(ExecutionStatus.SYSTEM_ERROR)
-                        .errorMessage("输入数量超限: " + inputList.size() + " > " + executionConfig.getMaxTestCases())
-                        .build();
-            }
-
-            log.debug("输入数据准备完成: requestId={}, inputCount={}", requestId, inputList.size());
+            String input = request.getInput() == null ? "" : request.getInput();
+            List<String> inputList = Collections.singletonList(input);
 
             int timeLimit = request.getTimeLimit() != null
                     ? request.getTimeLimit()
@@ -102,78 +71,161 @@ public class ExecutionServiceImpl implements ExecutionService {
                     ? request.getMemoryLimit()
                     : executionConfig.getMemoryLimit();
 
-            long execStart = System.currentTimeMillis();
             DockerCodeExecutor.ExecuteResult executeResult = dockerCodeExecutor.execute(
                     strategy,
                     request.getCode(),
                     inputList,
                     requestId,
                     timeLimit,
-                    memoryLimit
+                        memoryLimit
             );
-            runTime = System.currentTimeMillis() - execStart;
 
             long totalTime = System.currentTimeMillis() - startTime;
-            ExecuteResponse response = ExecuteResponse.builder()
-                    .status(ExecutionStatus.SUCCESS)
+                    var results = executeResult.results();
+                    var singleResult = results.isEmpty() ? null : results.getFirst();
+
+                    SingleExecuteResponse response = SingleExecuteResponse.builder()
+                        .status(singleResult != null ? singleResult.getStatus() : ExecutionStatus.SYSTEM_ERROR)
                     .compileOutput(executeResult.compileOutput())
-                    .results(executeResult.results())
-                    .compileTime(compileTime)
-                    .runTime(runTime)
+                        .result(singleResult)
                     .totalTime(totalTime)
                     .build();
 
-            log.info("代码执行完成: requestId={}, resultCount={}, totalTime={}ms",
-                    requestId, executeResult.results().size(), System.currentTimeMillis() - startTime);
+                    log.info("单次执行完成: requestId={}, status={}, totalTime={}ms",
+                        requestId, response.getStatus(), totalTime);
 
             return response;
 
         } catch (CompileException e) {
             log.warn("编译错误: requestId={}, error={}", requestId, e.getMessage());
-            return ExecuteResponse.builder()
+                    return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.COMPILE_ERROR)
                     .compileOutput(e.getMessage())
                     .build();
 
         } catch (DangerousCodeException e) {
             log.warn("危险代码: requestId={}, pattern={}", requestId, e.getPattern());
-            return ExecuteResponse.builder()
+                    return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.DANGEROUS_CODE)
                     .errorMessage(e.getMessage())
                     .build();
 
         } catch (IllegalArgumentException e) {
             log.warn("参数错误: requestId={}, error={}", requestId, e.getMessage());
-            return ExecuteResponse.builder()
+                    return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.SYSTEM_ERROR)
                     .errorMessage(e.getMessage())
                     .build();
 
         } catch (Exception e) {
             log.error("执行异常: requestId={}", requestId, e);
-            return ExecuteResponse.builder()
+                    return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.SYSTEM_ERROR)
                     .errorMessage("系统错误: " + e.getMessage())
                     .build();
         }
     }
 
-    /**
-     * 获取输入数据集
-     * <p>
-     * 根据请求类型获取输入数据：
-     * 1. 直接输入模式：将单个输入包装为数据集（不缓存）
-     * 2. URL 模式：从预签名 URL 下载 ZIP 并解压（按 ObjectKey 缓存）
-     * </p>
-     */
-    private InputDataSet getInputDataSet(ExecuteRequest request) {
-        if (request.isDirectInput()) {
-            return inputDataService.wrapSingleInput(request.getInput());
-        } else if (request.isUrlInput()) {
-            return inputDataService.getInputDataSet(request.getInputDataUrl());
-        } else {
-            return inputDataService.wrapSingleInput("");
+                public BatchExecuteResponse executeBatch(BatchExecuteRequest request) {
+                String requestId = request.getRequestId();
+                if (requestId == null || requestId.isBlank()) {
+                    requestId = UUID.randomUUID().toString().substring(0, 8);
+                }
+
+                log.info("开始批量执行代码: requestId={}, language={}", requestId, request.getLanguage());
+                long startTime = System.currentTimeMillis();
+
+                try {
+                    if (!strategyFactory.isSupported(request.getLanguage())) {
+                    return BatchExecuteResponse.builder()
+                        .status(ExecutionStatus.SYSTEM_ERROR)
+                        .errorMessage("不支持的编程语言: " + request.getLanguage())
+                        .build();
+                    }
+
+                    LanguageStrategy strategy = strategyFactory.getStrategy(request.getLanguage());
+                    List<String> inputList = resolveBatchInputs(request);
+
+                    if (inputList.isEmpty()) {
+                    inputList = Collections.singletonList("");
+                    }
+
+                    if (inputList.size() > executionConfig.getMaxTestCases()) {
+                    return BatchExecuteResponse.builder()
+                        .status(ExecutionStatus.SYSTEM_ERROR)
+                        .errorMessage("输入数量超限: " + inputList.size() + " > " + executionConfig.getMaxTestCases())
+                        .build();
+                    }
+
+                    int timeLimit = request.getTimeLimit() != null
+                        ? request.getTimeLimit()
+                        : executionConfig.getRunTimeout() * 1000;
+                    int memoryLimit = request.getMemoryLimit() != null
+                        ? request.getMemoryLimit()
+                        : executionConfig.getMemoryLimit();
+
+                    DockerCodeExecutor.ExecuteResult executeResult = dockerCodeExecutor.execute(
+                        strategy,
+                        request.getCode(),
+                        inputList,
+                        requestId,
+                        timeLimit,
+                        memoryLimit
+                    );
+
+                    List<com.github.ezzziy.codesandbox.model.dto.ExecutionResult> results = executeResult.results();
+                    int success = (int) results.stream().filter(r -> r.getStatus() == ExecutionStatus.SUCCESS).count();
+                    int failed = results.size() - success;
+                    ExecutionStatus overallStatus = failed == 0
+                        ? ExecutionStatus.SUCCESS
+                        : results.stream()
+                        .map(com.github.ezzziy.codesandbox.model.dto.ExecutionResult::getStatus)
+                        .filter(status -> status != ExecutionStatus.SUCCESS)
+                        .findFirst()
+                        .orElse(ExecutionStatus.RUNTIME_ERROR);
+
+                    return BatchExecuteResponse.builder()
+                        .status(overallStatus)
+                        .compileOutput(executeResult.compileOutput())
+                        .results(results)
+                        .summary(BatchExecuteResponse.Summary.builder()
+                            .total(results.size())
+                            .success(success)
+                            .failed(failed)
+                            .build())
+                        .totalTime(System.currentTimeMillis() - startTime)
+                        .build();
+
+                } catch (CompileException e) {
+                    return BatchExecuteResponse.builder()
+                        .status(ExecutionStatus.COMPILE_ERROR)
+                        .compileOutput(e.getMessage())
+                        .build();
+                } catch (DangerousCodeException e) {
+                    return BatchExecuteResponse.builder()
+                        .status(ExecutionStatus.DANGEROUS_CODE)
+                        .errorMessage(e.getMessage())
+                        .build();
+                } catch (Exception e) {
+                    log.error("批量执行异常: requestId={}", requestId, e);
+                    return BatchExecuteResponse.builder()
+                        .status(ExecutionStatus.SYSTEM_ERROR)
+                        .errorMessage("系统错误: " + e.getMessage())
+                        .build();
+                }
+                }
+
+    private List<String> resolveBatchInputs(BatchExecuteRequest request) {
+        if (request.getInputDataUrl() == null || request.getInputDataUrl().isBlank()) {
+            throw new IllegalArgumentException("批量执行必须提供 inputDataUrl");
         }
+
+        InputDataSet inputDataSet = inputDataService.getInputDataSet(request.getInputDataUrl());
+        if (!inputDataSet.hasExpectedOutputs()) {
+            throw new IllegalArgumentException("测试用例 ZIP 格式错误：必须包含 n.in 和 n.out 成对文件");
+        }
+
+        return inputDataSet.getInputs();
     }
 
     /**
