@@ -32,20 +32,10 @@ public class InputDataSet {
     private List<String> inputs;
 
     /**
-     * 期望输出列表，按序号排列（1.out, 2.out, 3.out...）
-     * 直接输入模式下可为空
-     */
-    private List<String> expectedOutputs;
-
-    /**
      * 获取输入数量
      */
     public int size() {
         return inputs != null ? inputs.size() : 0;
-    }
-
-    public boolean hasExpectedOutputs() {
-        return expectedOutputs != null && !expectedOutputs.isEmpty();
     }
 
     /**

@@ -217,15 +217,11 @@ public class ExecutionServiceImpl implements ExecutionService {
 
     private List<String> resolveBatchInputs(BatchExecuteRequest request) {
         if (request.getInputDataUrl() == null || request.getInputDataUrl().isBlank()) {
-            throw new IllegalArgumentException("批量执行必须提供 inputDataUrl");
+            throw new IllegalArgumentException("批量执行必须提供 inputDataUrl（zip 文件 URL）");
         }
 
         InputDataSet inputDataSet = inputDataService.getInputDataSet(request.getInputDataUrl());
-        if (!inputDataSet.hasExpectedOutputs()) {
-            throw new IllegalArgumentException("测试用例 ZIP 格式错误：必须包含 n.in 和 n.out 成对文件");
-        }
-
-        return inputDataSet.getInputs();
+        return inputDataSet.getInputs() == null ? new ArrayList<>() : inputDataSet.getInputs();
     }
 
     /**

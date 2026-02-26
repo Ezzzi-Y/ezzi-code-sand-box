@@ -7,13 +7,11 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.util.List;
-
 /**
  * 批量执行请求（多测试用例）
  * <p>
- * 仅支持通过一个 ZIP 预签名 URL 传入测试用例，不支持直接传入输入列表。
- * ZIP 结构要求：1.in,1.out,2.in,2.out...
+ * 仅支持通过预签名 URL 提供输入数据包。
+ * URL 必须指向 zip 文件，且 zip 内仅包含输入文件（如 1.in、2.in）。
  * </p>
  */
 @Data
@@ -32,9 +30,9 @@ public class BatchExecuteRequest {
     private String language;
 
     /**
-        * 预签名 URL（ZIP，必须包含 1.in,1.out,2.in,2.out...）
+     * 预签名 URL（ZIP，按 1.in / 2.in ...）
      */
-        @NotBlank(message = "批量执行必须提供 inputDataUrl")
+    @NotBlank(message = "inputDataUrl 不能为空，且必须是 zip 文件 URL")
     private String inputDataUrl;
 
     /**
@@ -46,4 +44,8 @@ public class BatchExecuteRequest {
      * 内存限制（MB）
      */
     private Integer memoryLimit;
+
+    public boolean isUrlInput() {
+        return true;
+    }
 }

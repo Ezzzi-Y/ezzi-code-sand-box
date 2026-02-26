@@ -57,11 +57,6 @@ public class InputDataServiceImpl implements InputDataService {
     private static final Pattern INPUT_FILE_PATTERN = Pattern.compile("^(\\d+)\\.in$");
 
     /**
-     * 匹配输出文件名的正则：数字.out
-     */
-    private static final Pattern OUTPUT_FILE_PATTERN = Pattern.compile("^(\\d+)\\.out$");
-
-    /**
      * 从预签名 URL 获取输入数据集
      * <p>
      * 1. 检查本地磁盘是否已存在（基于 ObjectKey）
@@ -118,7 +113,6 @@ public class InputDataServiceImpl implements InputDataService {
         return InputDataSet.builder()
                 .dataId(null)
                 .inputs(Collections.singletonList(input != null ? input : ""))
-                .expectedOutputs(Collections.emptyList())
                 .build();
     }
 
@@ -159,41 +153,30 @@ public class InputDataServiceImpl implements InputDataService {
     private InputDataSet loadFromLocalDisk(String objectKey, Path localDir) {
         try {
             TreeMap<Integer, String> inputMap = new TreeMap<>();
-            TreeMap<Integer, String> outputMap = new TreeMap<>();
             
             Files.list(localDir)
                     .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".in"))
                     .forEach(path -> {
                         String fileName = path.getFileName().toString();
-                        Matcher inputMatcher = INPUT_FILE_PATTERN.matcher(fileName);
-                        Matcher outputMatcher = OUTPUT_FILE_PATTERN.matcher(fileName);
-                        try {
-                            String content = Files.readString(path, StandardCharsets.UTF_8);
-                            if (inputMatcher.matches()) {
-                                int index = Integer.parseInt(inputMatcher.group(1));
+                        Matcher matcher = INPUT_FILE_PATTERN.matcher(fileName);
+                        if (matcher.matches()) {
+                            int index = Integer.parseInt(matcher.group(1));
+                            try {
+                                String content = Files.readString(path, StandardCharsets.UTF_8);
                                 inputMap.put(index, content);
-                            } else if (outputMatcher.matches()) {
-                                int index = Integer.parseInt(outputMatcher.group(1));
-                                outputMap.put(index, content);
+                            } catch (IOException e) {
+                                log.error("读取输入文件失败: {}", path, e);
                             }
-                        } catch (IOException e) {
-                            log.error("读取测试用例文件失败: {}", path, e);
                         }
                     });
 
-            validateCasePairs(inputMap, outputMap);
-
             List<String> inputs = new ArrayList<>(inputMap.values());
-            List<String> outputs = new ArrayList<>();
-            for (Integer index : inputMap.keySet()) {
-                outputs.add(outputMap.get(index));
-            }
             log.info("从本地磁盘加载输入数据: objectKey={}, count={}", objectKey, inputs.size());
 
             return InputDataSet.builder()
                     .dataId(objectKey)
                     .inputs(inputs)
-                    .expectedOutputs(outputs)
                     .build();
 
         } catch (IOException e) {
@@ -222,31 +205,22 @@ public class InputDataServiceImpl implements InputDataService {
             Path localDir = getLocalStoragePath(objectKey);
             Files.createDirectories(localDir);
 
-                ExtractedCases extractedCases = extractAndSaveToDisk(zipBytes, localDir);
-                TreeMap<Integer, String> inputMap = extractedCases.inputs();
-                TreeMap<Integer, String> outputMap = extractedCases.outputs();
+            TreeMap<Integer, String> inputMap = extractAndSaveToDisk(zipBytes, localDir);
 
             if (inputMap.isEmpty()) {
                 throw new RuntimeException("输入数据包中没有有效的输入文件（需要 1.in, 2.in... 格式）");
             }
 
-                validateCasePairs(inputMap, outputMap);
-
             setPermissions(localDir);
                 writeLocalMeta(localDir, remoteMeta);
 
             List<String> inputs = new ArrayList<>(inputMap.values());
-                List<String> outputs = new ArrayList<>();
-                for (Integer index : inputMap.keySet()) {
-                outputs.add(outputMap.get(index));
-                }
             log.info("输入数据已下载到本地: objectKey={}, path={}, count={}", 
                     objectKey, localDir, inputs.size());
 
             return InputDataSet.builder()
                     .dataId(objectKey)
                     .inputs(inputs)
-                    .expectedOutputs(outputs)
                     .build();
 
         } catch (Exception e) {
@@ -372,9 +346,8 @@ public class InputDataServiceImpl implements InputDataService {
      * 按文件名序号排序（1.in, 2.in, 3.in...）
      * </p>
      */
-    private ExtractedCases extractAndSaveToDisk(byte[] zipBytes, Path targetDir) throws IOException {
+    private TreeMap<Integer, String> extractAndSaveToDisk(byte[] zipBytes, Path targetDir) throws IOException {
         TreeMap<Integer, String> inputMap = new TreeMap<>();
-        TreeMap<Integer, String> outputMap = new TreeMap<>();
 
         try (ZipArchiveInputStream zis = new ZipArchiveInputStream(
                 new ByteArrayInputStream(zipBytes), StandardCharsets.UTF_8.name())) {
@@ -391,10 +364,9 @@ public class InputDataServiceImpl implements InputDataService {
                     fileName = fileName.substring(lastSlash + 1);
                 }
 
-                Matcher inputMatcher = INPUT_FILE_PATTERN.matcher(fileName);
-                Matcher outputMatcher = OUTPUT_FILE_PATTERN.matcher(fileName);
-                if (inputMatcher.matches() || outputMatcher.matches()) {
-                    int index = Integer.parseInt((inputMatcher.matches() ? inputMatcher : outputMatcher).group(1));
+                Matcher matcher = INPUT_FILE_PATTERN.matcher(fileName);
+                if (matcher.matches()) {
+                    int index = Integer.parseInt(matcher.group(1));
 
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     byte[] buffer = new byte[4096];
@@ -404,11 +376,7 @@ public class InputDataServiceImpl implements InputDataService {
                     }
 
                     String content = baos.toString(StandardCharsets.UTF_8);
-                    if (inputMatcher.matches()) {
-                        inputMap.put(index, content);
-                    } else {
-                        outputMap.put(index, content);
-                    }
+                    inputMap.put(index, content);
 
                     Path targetFile = targetDir.resolve(fileName);
                     Files.writeString(targetFile, content, StandardCharsets.UTF_8);
@@ -418,23 +386,7 @@ public class InputDataServiceImpl implements InputDataService {
             }
         }
 
-        return new ExtractedCases(inputMap, outputMap);
-    }
-
-    private void validateCasePairs(TreeMap<Integer, String> inputMap, TreeMap<Integer, String> outputMap) {
-        if (inputMap.isEmpty()) {
-            return;
-        }
-        if (outputMap.isEmpty()) {
-            throw new RuntimeException("测试用例 ZIP 格式错误：缺少 *.out 文件");
-        }
-
-        if (!inputMap.keySet().equals(outputMap.keySet())) {
-            throw new RuntimeException("测试用例 ZIP 格式错误：*.in 与 *.out 必须按相同编号成对出现");
-        }
-    }
-
-    private record ExtractedCases(TreeMap<Integer, String> inputs, TreeMap<Integer, String> outputs) {
+        return inputMap;
     }
 
     /**

@@ -116,26 +116,11 @@ Content-Type: application/json
 
 ```json
 {
-  "language": "java",
-  "languageVersion": "11",
+  "language": "java17",
   "code": "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int a = sc.nextInt();\n        int b = sc.nextInt();\n        System.out.println(a + b);\n    }\n}",
-  "testCases": [
-    {
-      "inputDataKey": "questions/1001/testcases/1.in",
-      "caseId": "case-1"
-    },
-    {
-      "inputDataKey": "questions/1001/testcases/2.in",
-      "caseId": "case-2"
-    },
-    {
-      "inputDataKey": "questions/1001/testcases/3.in",
-      "caseId": "case-3"
-    }
-  ],
+  "inputDataUrl": "https://example.com/questions/1001/inputs.zip?signature=xxx",
   "timeLimit": 2000,
-  "memoryLimit": 256,
-  "stopOnFirstFailure": false
+  "memoryLimit": 256
 }
 ```
 
@@ -143,10 +128,9 @@ Content-Type: application/json
 
 | 字段 | 类型 | 必填 | 描述 |
 |------|------|------|------|
-| `testCases` | Array | ✅ | 测试用例列表 |
-| `testCases[].inputDataKey` | String | ✅ | OSS 输入数据 Key |
-| `testCases[].caseId` | String | ✅ | 测试用例标识 |
-| `stopOnFirstFailure` | Boolean | ❌ | 遇到失败是否停止（默认 false）|
+| `inputDataUrl` | String | ✅ | 预签名 URL，必须指向 zip 输入数据包 |
+
+> zip 文件中仅包含输入文件，命名规则为 `1.in`、`2.in`、`3.in`...
 
 #### 响应
 
@@ -357,16 +341,11 @@ public enum ExecutionStatus {
     
     // 成功状态
     ACCEPTED("AC", "执行成功"),
-  "inputDataUrl": "https://example.com/testcases.zip?sign=...",
+    
     // 编译相关
     COMPILE_ERROR("CE", "编译错误"),
     
     // 运行时错误
-
-批量接口约束：
-- 仅支持传入一个 `inputDataUrl`。
-- 不支持直接传入输入列表。
-- URL 指向 zip 文件，且 zip 必须包含成对的 `n.in` 与 `n.out` 文件。
     RUNTIME_ERROR("RE", "运行时错误"),
     TIME_LIMIT_EXCEEDED("TLE", "超时"),
     MEMORY_LIMIT_EXCEEDED("MLE", "内存超限"),

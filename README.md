@@ -155,16 +155,11 @@ sandbox:
   "requestId": "test-req-002",
   "language": "python3",
   "code": "print(sum(map(int, input().split())))",
-  "inputDataUrl": "https://example.com/testcases.zip?sign=...",
+  "inputDataUrl": "https://example.com/question-1001-inputs.zip?signature=xxx",
   "timeLimit": 1000,
   "memoryLimit": 256
 }
 ```
-
-**约束说明**:
-- 批量执行只支持 `inputDataUrl`，不支持直接传入输入列表。
-- `inputDataUrl` 必须指向 zip 文件。
-- zip 内文件必须成对出现：`1.in,1.out,2.in,2.out...`。
 
 **响应示例**:
 ```json
@@ -198,7 +193,9 @@ sandbox:
 
 ### 输入数据缓存策略
 
-- 当批量请求使用 `inputDataUrl` 时，服务在每次执行前先请求远端对象元数据。
+- 批量请求必须提供 `inputDataUrl`，且 URL 必须指向 zip 输入数据包。
+- zip 中只包含输入数据文件，命名规则为 `1.in`、`2.in`、`3.in`...
+- 服务在每次执行前先请求远端对象元数据。
 - 以 `ETag` 与 `Last-Modified` 与本地缓存元数据比较：
   - 一致：直接使用本地缓存。
   - 不一致：重新下载并覆盖本地缓存。
