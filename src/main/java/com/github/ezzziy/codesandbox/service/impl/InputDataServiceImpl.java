@@ -240,14 +240,15 @@ public class InputDataServiceImpl implements InputDataService {
             connection.connect();
 
             int statusCode = connection.getResponseCode();
-            if (statusCode < 200 || statusCode >= 400) {
-                throw new RuntimeException("查询远端对象元数据失败，HTTP 状态码: " + statusCode);
+            if (statusCode == HttpURLConnection.HTTP_OK) {
+                String etag = trimHeader(connection.getHeaderField("ETag"));
+                String lastModified = trimHeader(connection.getHeaderField("Last-Modified"));
+                return new RemoteObjectMeta(etag, lastModified);
             }
-
-            String etag = trimHeader(connection.getHeaderField("ETag"));
-            String lastModified = trimHeader(connection.getHeaderField("Last-Modified"));
-
-            return new RemoteObjectMeta(etag, lastModified);
+            if (statusCode == HttpURLConnection.HTTP_NOT_FOUND) {
+                throw new RuntimeException("远端对象不存在: " + OssUrlParser.extractObjectKey(presignedUrl));
+            }
+            throw new RuntimeException("查询远端对象元数据失败，HTTP 状态码: " + statusCode);
         } catch (Exception e) {
             throw new RuntimeException("获取远端对象元数据失败: " + e.getMessage(), e);
         } finally {
