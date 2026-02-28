@@ -288,25 +288,33 @@ public class DockerCodeExecutor {
                 // 有输入：使用 printf 管道 + 计时包装 + 内存监测
                 // 使用exec让用户程序替换shell进程,确保time统计的是用户程序而非shell
                 // 使用-o参数将time的输出写入临时文件,避免与程序输出混淆
+                // 使用EXIT_CODE=$?捕获真实退出码，最后exit $EXIT_CODE传递给Docker
                 String escapedInput = escapeShellInput(input);
                 timedCmd = String.format(
-                        "START=$(date +%%s%%N); " +
                         "MEMFILE=/tmp/mem_$$; " +
+                        "START=$(date +%%s%%N); " +
                         "printf '%%s' '%s' | /usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "EXIT_CODE=$?; " +
                         "END=$(date +%%s%%N); " +
                         "echo '%s'$((END-START)); " +
                         "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
-                        "echo '%s'$MEM",
+                        "echo '%s'$MEM; " +
+                        "exit $EXIT_CODE",
                         escapedInput, originalCmd, TIME_MARKER, MEMORY_MARKER);
             } else {
                 // 无输入：直接计时包装 + 内存监测
-                // 使用/usr/bin/time直接包裹用户命令,格式化输出只显示maxrss(峰值内存KB)
+                // 使用-o参数将time的内存输出写入临时文件,避免吞掉stdout/stderr
+                // 使用EXIT_CODE=$?捕获真实退出码，最后exit $EXIT_CODE传递给Docker
                 timedCmd = String.format(
+                        "MEMFILE=/tmp/mem_$$; " +
                         "START=$(date +%%s%%N); " +
-                        "MEM=$(/usr/bin/time -f '%%M' sh -c 'exec %s' 2>&1 | tail -1); " +
+                        "/usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "EXIT_CODE=$?; " +
                         "END=$(date +%%s%%N); " +
                         "echo '%s'$((END-START)); " +
-                        "echo '%s'$MEM",
+                        "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
+                        "echo '%s'$MEM; " +
+                        "exit $EXIT_CODE",
                         originalCmd, TIME_MARKER, MEMORY_MARKER);
             }
             
@@ -460,8 +468,6 @@ public class DockerCodeExecutor {
                                               int timeLimit,
                                               int memoryLimit) {
 
-        long startTime = System.currentTimeMillis();
-
         CommandResult result = executeCommandInDir(
                 containerId,
                 strategy.getRunCommand(taskDir + "/" + strategy.getExecutableFileName()),
@@ -470,7 +476,8 @@ public class DockerCodeExecutor {
                 taskDir
         );
 
-        long executionTime = System.currentTimeMillis() - startTime;
+        // 优先使用容器内纳秒级精确时间，避免 Docker API 通信开销干扰
+        long executionTime = result.getExecutionTime();
 
         // 1. 超时
         if (result.isTimeout()) {
@@ -544,25 +551,33 @@ public class DockerCodeExecutor {
                 // 有输入：使用 printf 管道 + 计时包装 + 内存监测
                 // 使用exec让用户程序替换shell进程,确保time统计的是用户程序而非shell
                 // 使用-o参数将time的输出写入临时文件,避免与程序输出混淆
+                // 使用EXIT_CODE=$?捕获真实退出码，最后exit $EXIT_CODE传递给Docker
                 String escapedInput = escapeShellInput(input);
                 timedCmd = String.format(
-                        "%sSTART=$(date +%%s%%N); " +
-                        "MEMFILE=/tmp/mem_$$; " +
+                        "%sMEMFILE=/tmp/mem_$$; " +
+                        "START=$(date +%%s%%N); " +
                         "printf '%%s' '%s' | /usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "EXIT_CODE=$?; " +
                         "END=$(date +%%s%%N); " +
                         "echo '%s'$((END-START)); " +
                         "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
-                        "echo '%s'$MEM",
+                        "echo '%s'$MEM; " +
+                        "exit $EXIT_CODE",
                         cdPrefix, escapedInput, originalCmd, TIME_MARKER, MEMORY_MARKER);
             } else {
                 // 无输入：直接计时包装 + 内存监测
-                // 使用/usr/bin/time直接包裹用户命令,格式化输出只显示maxrss(峰值内存KB)
+                // 使用-o参数将time的内存输出写入临时文件,避免吞掉stdout/stderr
+                // 使用EXIT_CODE=$?捕获真实退出码，最后exit $EXIT_CODE传递给Docker
                 timedCmd = String.format(
-                        "%sSTART=$(date +%%s%%N); " +
-                        "MEM=$(/usr/bin/time -f '%%M' sh -c 'exec %s' 2>&1 | tail -1); " +
+                        "%sMEMFILE=/tmp/mem_$$; " +
+                        "START=$(date +%%s%%N); " +
+                        "/usr/bin/time -f '%%M' -o $MEMFILE sh -c 'exec %s'; " +
+                        "EXIT_CODE=$?; " +
                         "END=$(date +%%s%%N); " +
                         "echo '%s'$((END-START)); " +
-                        "echo '%s'$MEM",
+                        "MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; " +
+                        "echo '%s'$MEM; " +
+                        "exit $EXIT_CODE",
                         cdPrefix, originalCmd, TIME_MARKER, MEMORY_MARKER);
             }
             
@@ -710,8 +725,6 @@ public class DockerCodeExecutor {
                                     int timeLimit,
                                     int memoryLimit) {
 
-        long startTime = System.currentTimeMillis();
-
         CommandResult result = executeCommand(
                 containerId,
                 strategy.getRunCommand("/sandbox/workspace/" + strategy.getExecutableFileName()),
@@ -719,7 +732,8 @@ public class DockerCodeExecutor {
                 timeLimit
         );
 
-        long executionTime = System.currentTimeMillis() - startTime;
+        // 优先使用容器内纳秒级精确时间，避免 Docker API 通信开销干扰
+        long executionTime = result.getExecutionTime();
 
         // 1. 超时
         if (result.isTimeout()) {

@@ -59,7 +59,7 @@ public class Java17LanguageStrategy implements LanguageStrategy {
             Pattern.compile("URLClassLoader"),
             Pattern.compile("defineClass"),
             // 线程操作（限制）
-            Pattern.compile("Thread\\.sleep\\s*\\(\\s*[0-9]{5,}"),
+            Pattern.compile("Thread\\.sleep\\s*\\("),  // 禁止所有 Thread.sleep 调用
             Pattern.compile("Runtime\\.getRuntime\\(\\)\\.exit"),
             Pattern.compile("System\\.exit"),
             // JNI

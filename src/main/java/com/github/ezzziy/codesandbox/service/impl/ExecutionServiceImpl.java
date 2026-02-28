@@ -97,31 +97,39 @@ public class ExecutionServiceImpl implements ExecutionService {
             return response;
 
         } catch (CompileException e) {
+            long totalTime = System.currentTimeMillis() - startTime;
             log.warn("编译错误: requestId={}, error={}", requestId, e.getMessage());
                     return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.COMPILE_ERROR)
                     .compileOutput(e.getMessage())
+                    .totalTime(totalTime)
                     .build();
 
         } catch (DangerousCodeException e) {
+            long totalTime = System.currentTimeMillis() - startTime;
             log.warn("危险代码: requestId={}, pattern={}", requestId, e.getPattern());
                     return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.DANGEROUS_CODE)
                     .errorMessage(e.getMessage())
+                    .totalTime(totalTime)
                     .build();
 
         } catch (IllegalArgumentException e) {
+            long totalTime = System.currentTimeMillis() - startTime;
             log.warn("参数错误: requestId={}, error={}", requestId, e.getMessage());
                     return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.SYSTEM_ERROR)
                     .errorMessage(e.getMessage())
+                    .totalTime(totalTime)
                     .build();
 
         } catch (Exception e) {
+            long totalTime = System.currentTimeMillis() - startTime;
             log.error("执行异常: requestId={}", requestId, e);
                     return SingleExecuteResponse.builder()
                     .status(ExecutionStatus.SYSTEM_ERROR)
                     .errorMessage("系统错误: " + e.getMessage())
+                    .totalTime(totalTime)
                     .build();
         }
     }
@@ -200,17 +208,20 @@ public class ExecutionServiceImpl implements ExecutionService {
                     return BatchExecuteResponse.builder()
                         .status(ExecutionStatus.COMPILE_ERROR)
                         .compileOutput(e.getMessage())
+                        .totalTime(System.currentTimeMillis() - startTime)
                         .build();
                 } catch (DangerousCodeException e) {
                     return BatchExecuteResponse.builder()
                         .status(ExecutionStatus.DANGEROUS_CODE)
                         .errorMessage(e.getMessage())
+                        .totalTime(System.currentTimeMillis() - startTime)
                         .build();
                 } catch (Exception e) {
                     log.error("批量执行异常: requestId={}", requestId, e);
                     return BatchExecuteResponse.builder()
                         .status(ExecutionStatus.SYSTEM_ERROR)
                         .errorMessage("系统错误: " + e.getMessage())
+                        .totalTime(System.currentTimeMillis() - startTime)
                         .build();
                 }
                 }
