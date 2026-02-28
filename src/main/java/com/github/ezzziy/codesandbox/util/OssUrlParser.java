@@ -83,26 +83,6 @@ public class OssUrlParser {
     }
 
     /**
-     * 从 ObjectKey 中提取 Bucket 名称
-     */
-    public static String extractBucket(String objectKey) {
-        if (objectKey == null || !objectKey.contains("/")) {
-            return null;
-        }
-        return objectKey.substring(0, objectKey.indexOf('/'));
-    }
-
-    /**
-     * 从 ObjectKey 中提取纯对象路径（不含 bucket）
-     */
-    public static String extractObjectPath(String objectKey) {
-        if (objectKey == null || !objectKey.contains("/")) {
-            return objectKey;
-        }
-        return objectKey.substring(objectKey.indexOf('/') + 1);
-    }
-
-    /**
      * 判断是否为阿里云 OSS 域名
      */
     private static boolean isAliyunOss(String host) {
@@ -140,18 +120,4 @@ public class OssUrlParser {
         throw new IllegalArgumentException("无法从 S3 域名中提取 bucket: " + host);
     }
 
-    /**
-     * 生成用于缓存的 Key（基于 ObjectKey 的哈希）
-     * <p>
-     * 避免 ObjectKey 过长或包含特殊字符
-     * </p>
-     */
-    public static String toCacheKey(String objectKey) {
-        if (objectKey == null) {
-            return null;
-        }
-        // 直接使用 objectKey，因为它已经是唯一标识
-        // 如果需要更短的 key，可以使用 hash
-        return objectKey;
-    }
 }

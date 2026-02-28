@@ -199,18 +199,8 @@ Content-Type: application/json
 - 批量执行时如果使用 `inputDataUrl`，服务会在每次执行前发起元数据查询。
 - 使用 `ETag` 和 `Last-Modified` 与本地缓存元数据比对。
 - 一致则使用本地缓存，不一致则重新下载并覆盖。
-- 不再提供手动触发缓存更新的 API。
-        "message": "refreshed"
-      },
-      {
-        "objectKey": "questions/1001/testcases/2.in",
-        "success": true,
-        "message": "refreshed"
-      }
-    ]
-  }
-}
-```
+- 本地缓存目录由 `ObjectKey` 决定，目录中保存 `*.in` 文件与 `_meta.properties`。
+- 当前版本无独立缓存管理 API（无 `/cache/*` 路由）。
 
 ---
 
@@ -391,10 +381,9 @@ public class ExecuteRequest {
     private String code;
     
     /**
-     * OSS 输入数据 Key
+     * 单次执行输入
      */
-    @NotBlank(message = "输入数据Key不能为空")
-    private String inputDataKey;
+    private String input;
     
     /**
      * 时间限制（毫秒）
@@ -534,36 +523,21 @@ public class RunResult {
 @Data
 @Builder
 public class BatchExecuteRequest {
+
+  private String requestId;
     
     @NotBlank
     private String language;
     
-    private String languageVersion;
-    
     @NotBlank
     @Size(max = 65536)
     private String code;
-    
-    @NotEmpty(message = "测试用例不能为空")
-    @Size(max = 100, message = "测试用例最多100个")
-    private List<TestCase> testCases;
+
+    @NotBlank(message = "inputDataUrl 不能为空，且必须是 zip 文件 URL")
+    private String inputDataUrl;
     
     private Integer timeLimit = 5000;
     private Integer memoryLimit = 256;
-    private Boolean stopOnFirstFailure = false;
-}
-
-/**
- * 测试用例
- */
-@Data
-public class TestCase {
-    
-    @NotBlank
-    private String inputDataKey;
-    
-    @NotBlank
-    private String caseId;
 }
 
 /**
@@ -680,8 +654,8 @@ public class ExecuteController {
             @Valid @RequestBody ExecuteRequest request,
             @RequestHeader(value = "X-Request-ID", required = false) String requestId) {
         
-        log.info("收到执行请求: language={}, inputKey={}, requestId={}", 
-                request.getLanguage(), request.getInputDataKey(), requestId);
+        log.info("收到执行请求: language={}, requestId={}", 
+          request.getLanguage(), requestId);
         
         ExecutionResult result = executionService.execute(request);
         
@@ -716,63 +690,13 @@ public class ExecuteController {
 }
 ```
 
-### 5.2 CacheController
+### 5.2 输入数据缓存管理（当前实现）
 
-```java
-package com.github.ezzziy.codesandbox.controller;
-
-import com.github.ezzziy.codesandbox.model.request.CacheRefreshRequest;
-import com.github.ezzziy.codesandbox.model.response.CacheRefreshResult;
-import com.github.ezzziy.codesandbox.model.response.Result;
-import com.github.ezzziy.codesandbox.service.CacheService;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.web.bind.annotation.*;
-
-@Slf4j
-@RestController
-@RequestMapping("/cache")
-@RequiredArgsConstructor
-@Tag(name = "缓存管理", description = "输入数据缓存管理接口")
-public class CacheController {
-
-    private final CacheService cacheService;
-
-    /**
-     * 刷新指定缓存
-     */
-    @PostMapping("/refresh")
-    @Operation(summary = "刷新缓存", description = "删除并重新下载指定的输入数据缓存")
-    public Result<CacheRefreshResult> refresh(@Valid @RequestBody CacheRefreshRequest request) {
-        log.info("收到缓存刷新请求: keys={}", request.getObjectKeys());
-        CacheRefreshResult result = cacheService.refresh(request.getObjectKeys(), request.getForceDownload());
-        return Result.success(result);
-    }
-
-    /**
-     * 清空所有缓存
-     */
-    @DeleteMapping("/clear")
-    @Operation(summary = "清空缓存", description = "清空所有输入数据缓存")
-    public Result<Void> clearAll() {
-        log.info("收到清空缓存请求");
-        cacheService.clearAll();
-        return Result.success();
-    }
-
-    /**
-     * 获取缓存状态
-     */
-    @GetMapping("/status")
-    @Operation(summary = "缓存状态", description = "获取当前缓存状态信息")
-    public Result<CacheStatus> getStatus() {
-        return Result.success(cacheService.getStatus());
-    }
-}
-```
+- 当前版本没有独立 `CacheController`，也没有 `/cache/*` 路由。
+- 缓存管理能力由 `InputDataServiceImpl.getInputDataSet()` 内聚处理：
+  - 从 `inputDataUrl` 提取 `ObjectKey` 作为本地目录标识
+  - 对 `presignedUrl` 发起 `HEAD` 获取 `ETag/Last-Modified`
+  - 命中则读取本地 `.in` 文件；未命中则 `GET` 下载 ZIP 并解压
 
 ### 5.3 HealthController
 

@@ -20,7 +20,7 @@
 | 容器化 | Docker | 20.10+ |
 | Docker 交互 | docker-java | 3.3.x |
 | HTTP 客户端 | Hutool HttpUtil | 5.8.x |
-| 本地缓存 | Caffeine | 3.x |
+| 本地缓存 | 磁盘文件缓存（InputDataService） | - |
 | 工具库 | Hutool | 5.8.x |
 
 ### 1.3 支持的编程语言
@@ -39,6 +39,8 @@
 
 ### 2.1 整体架构图
 
+> 2026-02 实现说明：输入数据缓存由 `InputDataService` 内聚实现，当前无独立 `CacheController` / `CacheService`。
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              OJ 判题服务                                      │
@@ -52,29 +54,29 @@
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                         API Layer                                    │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ ExecuteController│  │ CacheController  │  │ HealthController │  │   │
-│  │  └────────┬─────────┘  └────────┬─────────┘  └──────────────────┘  │   │
+│  │  │ ExecuteController│                       │ HealthController │  │   │
+│  │  └────────┬─────────┘                       └──────────────────┘  │   │
 │  └───────────┼──────────────────────┼──────────────────────────────────┘   │
-│              │                      │                                       │
-│  ┌───────────▼──────────────────────▼──────────────────────────────────┐   │
+│              │                                                          │
+│  ┌───────────▼──────────────────────────────────────────────────────────┐   │
 │  │                        Service Layer                                 │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ ExecutionService │  │   CacheService   │  │LanguageRegistry  │  │   │
+│  │  │ ExecutionService │  │ InputDataService │  │LanguageRegistry  │  │   │
 │  │  └────────┬─────────┘  └────────┬─────────┘  └──────────────────┘  │   │
 │  └───────────┼──────────────────────┼──────────────────────────────────┘   │
 │              │                      │                                       │
 │  ┌───────────▼──────────────────────▼──────────────────────────────────┐   │
 │  │                       Core Layer                                     │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ DockerExecutor   │  │  InputDataCache  │  │  TestCaseService │  │   │
+│  │  │ DockerExecutor   │  │ InputDataService │  │  TestCaseService │  │   │
 │  │  └────────┬─────────┘  └──────────────────┘  └──────────────────┘  │   │
 │  └───────────┼──────────────────────────────────────────────────────────┘   │
 │              │                                                              │
 │  ┌───────────▼──────────────────────────────────────────────────────────┐   │
 │  │                      Infrastructure Layer                            │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │  Docker Engine   │  │   Local Cache    │  │  HTTP Download   │  │   │
-│  │  │   (容器运行时)     │  │   (Caffeine)     │  │  (预签名URL)      │  │   │
+│  │  │  Docker Engine   │  │  Local Disk Cache│  │  HTTP Download   │  │   │
+│  │  │   (容器运行时)     │  │ (_meta+*.in 文件) │  │  (预签名URL)      │  │   │
 │  │  └──────────────────┘  └──────────────────┘  └──────────────────┘  │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -83,9 +85,9 @@
 ### 2.2 执行时序图
 
 ```
-┌──────┐     ┌──────────┐    ┌───────────┐    ┌─────────┐    ┌──────┐    ┌───────┐
-│Client│     │Controller│    │ ExecService│    │CacheService│  │Executor│  │Docker │
-└──┬───┘     └────┬─────┘    └─────┬─────┘    └────┬────┘    └───┬───┘   └───┬───┘
+┌──────┐     ┌──────────┐    ┌───────────┐    ┌─────────────┐   ┌──────┐    ┌───────┐
+│Client│     │Controller│    │ ExecService│    │InputDataService│ │Executor│  │Docker │
+└──┬───┘     └────┬─────┘    └─────┬─────┘    └──────┬──────┘   └───┬───┘   └───┬───┘
    │              │                │               │             │           │
    │ POST /execute│                │               │             │           │
    │─────────────>│                │               │             │           │
@@ -93,14 +95,14 @@
    │              │  execute(req)  │               │             │           │
    │              │───────────────>│               │             │           │
    │              │                │               │             │           │
-   │              │                │ getInputData()│             │           │
+  │              │                │ getInputDataSet()          │           │
    │              │                │──────────────>│             │           │
    │              │                │               │             │           │
-   │              │                │               │─┐           │           │
-   │              │                │               │ │ 检查缓存    │           │
-   │              │                │               │<┘           │           │
+  │              │                │               │─┐           │           │
+  │              │                │               │ │ HEAD(预签名URL)       │
+  │              │                │               │<┘           │           │
    │              │                │               │             │           │
-   │              │                │               │ (缓存未命中) │           │
+  │              │                │               │ (缓存未命中) │           │
    │              │                │               │────────>HTTP Download   │
    │              │                │               │<────────(预签名URL)      │
    │              │                │               │             │           │
@@ -154,17 +156,16 @@ com.github.ezzziy.codesandbox
 │
 ├── controller/                          # API 层
 │   ├── ExecuteController.java          # 代码执行接口
-│   ├── CacheController.java            # 缓存管理接口
 │   └── HealthController.java           # 健康检查接口
 │
 ├── service/                             # 服务层
 │   ├── ExecutionService.java           # 执行服务接口
+│   ├── InputDataService.java           # 输入数据缓存与读取服务
 │   ├── impl/
 │   │   └── ExecutionServiceImpl.java   # 执行服务实现
-│   ├── CacheService.java               # 缓存服务接口
 │   ├── impl/
-│   │   └── CacheServiceImpl.java       # 缓存服务实现
-│   └── OSSService.java                 # OSS 服务
+│   │   └── InputDataServiceImpl.java   # 输入数据缓存实现
+│   └── HealthService.java              # 健康服务
 │
 ├── executor/                            # 执行器层（核心）
 │   ├── CodeExecutor.java               # 执行器接口
@@ -182,11 +183,6 @@ com.github.ezzziy.codesandbox
 │   ├── DockerClientWrapper.java        # Docker 客户端封装
 │   ├── ContainerManager.java           # 容器管理器
 │   └── ResourceLimiter.java            # 资源限制器
-│
-├── cache/                               # 缓存层
-│   ├── InputDataCache.java             # 输入数据缓存接口
-│   ├── LocalFileCache.java             # 本地文件缓存实现
-│   └── CacheManager.java               # 缓存管理器
 │
 ├── oss/                                 # OSS 层
 │   ├── OSSClient.java                  # OSS 客户端接口
@@ -254,18 +250,18 @@ com.github.ezzziy.codesandbox
     <version>3.3.4</version>
 </dependency>
 
-<!-- MinIO Client -->
+<!-- Hutool（含 HttpUtil，用于预签名 URL 下载） -->
 <dependency>
-    <groupId>io.minio</groupId>
-    <artifactId>minio</artifactId>
-    <version>8.5.7</version>
+  <groupId>cn.hutool</groupId>
+  <artifactId>hutool-all</artifactId>
+  <version>5.8.38</version>
 </dependency>
 
-<!-- Caffeine Cache -->
+<!-- Apache Commons Compress（ZIP 解压） -->
 <dependency>
-    <groupId>com.github.ben-manes.caffeine</groupId>
-    <artifactId>caffeine</artifactId>
-    <version>3.1.8</version>
+  <groupId>org.apache.commons</groupId>
+  <artifactId>commons-compress</artifactId>
+  <version>1.26.0</version>
 </dependency>
 
 <!-- Apache Commons IO -->

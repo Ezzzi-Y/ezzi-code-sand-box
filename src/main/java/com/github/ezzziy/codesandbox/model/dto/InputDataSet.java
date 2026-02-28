@@ -30,21 +30,4 @@ public class InputDataSet {
      * 输入数据列表，按序号排列（1.in, 2.in, 3.in...）
      */
     private List<String> inputs;
-
-    /**
-     * 获取输入数量
-     */
-    public int size() {
-        return inputs != null ? inputs.size() : 0;
-    }
-
-    /**
-     * 获取指定索引的输入（0-based）
-     */
-    public String getInput(int index) {
-        if (inputs == null || index < 0 || index >= inputs.size()) {
-            return null;
-        }
-        return inputs.get(index);
-    }
 }
