@@ -1,7 +1,8 @@
 # 输入数据缓存体系重构方案
 
-> 状态：**待审批**
+> 状态：**✅ 已实施**
 > 日期：2026-02-28
+> 完成说明：本方案中的所有改动均已在代码中落地。死代码已清理，4 个 BUG 已修复，并且在实施过程中同步落地了文档 10（签名 GET + ETag 方案），将 HEAD 请求全部改为 GET。
 
 ---
 
@@ -301,7 +302,7 @@ private Path getLocalStoragePath(String objectKey) {
  * 缓存机制：
  * <ul>
  *   <li>以 ObjectKey 为标识在本地磁盘缓存解压后的 .in 文件</li>
- *   <li>每次请求通过 HEAD 获取远端 ETag/Last-Modified 与本地元数据比对</li>
+ *   <li>每次请求通过 GET 获取远端响应头中的 ETag/Last-Modified 与本地元数据比对</li>
  *   <li>版本一致则复用本地缓存，不一致则重新下载覆盖</li>
  * </ul>
  *
@@ -358,4 +359,4 @@ public interface InputDataService {
 
 1. `mvn compile` 编译通过
 2. 全局搜索被删方法名，确认无残留引用
-3. 功能验证：发起 `/execute/batch` 请求，确认 HEAD + GET + 缓存命中流程正常
+3. 功能验证：发起 `/execute/batch` 请求，确认 GET + 缓存命中流程正常

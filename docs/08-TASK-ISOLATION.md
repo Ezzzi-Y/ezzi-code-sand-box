@@ -17,7 +17,6 @@
 | Java 8 | `sandbox-java8:latest` | `eclipse-temurin:8-jdk-alpine` |
 | Java 17 | `sandbox-java17:latest` | `eclipse-temurin:17-jdk-alpine` |
 | Python 3 | `sandbox-python:latest` | `python:3.10-alpine` |
-| Go | `sandbox-golang:latest` | `golang:1.20-alpine` |
 
 ### 2.2 沙箱镜像通用特性
 
@@ -155,15 +154,15 @@ cd /sandbox/workspace/job-{requestId} && java Main
 
 ### 6.2 已移除的运行时初始化逻辑
 
-重构后彻底删除了所有运行时环境准备代码：
+重构后彻底删除了运行时环境准备代码：
 
 ```java
+// ✔ 保留 - exec 命令仍然通过 .withUser("sandbox") 指定执行用户
+.withUser("sandbox")
+
 // ❌ 已删除 - 不再需要运行时初始化目录
 initSandboxDirectory(containerId)
 mkdir -p /sandbox/workspace/tasks
-
-// ❌ 已删除 - 不再显式指定用户
-.withUser("sandbox")
 
 // ❌ 已删除 - 不再需要权限修补
 chmod 777 /sandbox
@@ -174,7 +173,7 @@ dir.toFile().setWritable(true, false)
 **新架构原则：镜像即执行环境**
 - 沙箱镜像构建时已内置完整环境（用户、目录、权限）
 - 容器启动后立即可用，无需中间准备步骤
-- 所有 exec 操作仅在 running 状态容器中执行
+- exec 命令通过 `.withUser("sandbox")` 以 sandbox 用户身份执行
 
 ## 7. 安全性保证
 

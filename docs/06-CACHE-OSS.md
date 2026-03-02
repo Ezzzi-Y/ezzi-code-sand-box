@@ -22,7 +22,7 @@
 
 ### 2.2 核心原则
 
-- **远端访问必须使用完整预签名 URL**（HEAD + GET）
+- **远端访问使用完整预签名 URL 发起 GET 请求**（一次请求同时获取元数据和 ZIP 内容）
 - **ObjectKey 仅用于本地缓存定位**，不用于拼接远端无签名 URL
 - 批量执行接口仅支持 `inputDataUrl`（zip 预签名 URL）模式
 
@@ -39,28 +39,29 @@
 ### 3.2 处理流程
 
 1. 解析预签名 URL，提取 `ObjectKey`（用于缓存目录）
-2. 使用预签名 URL 发起 `HEAD` 查询远端元数据
+2. 使用预签名 URL 发起 `GET` 请求，同时获取远端元数据（`ETag`/`Last-Modified`）和 ZIP 内容
 3. 读取本地 `_meta.properties` 比对版本
-4. 若一致：直接读取本地 `*.in` 文件
-5. 若不一致或无缓存：使用预签名 URL `GET` 下载 ZIP，解压并写入元数据
+4. 若一致：丢弃本次 GET 的 ZIP 内容，直接读取本地 `*.in` 文件
+5. 若不一致或无缓存：使用本次 GET 的 ZIP 内容解压并写入元数据
 
 ---
 
 ## 4. 版本判定机制
 
-### 4.1 远端元数据获取
+### 4.1 远端数据获取
 
-`fetchRemoteMeta(String presignedUrl)` 使用：
+`fetchRemoteObject(String presignedUrl)` 使用：
 
-- `HttpURLConnection`
-- `HEAD presignedUrl`
+- `cn.hutool.http.HttpRequest.get()`
+- `GET presignedUrl`（一次请求同时获取元数据和 ZIP 内容）
 - 超时配置：`sandbox.input-data.download-timeout`
+- 返回 `RemoteFetchResult(byte[] zipBytes, RemoteObjectMeta meta)`
 
 状态码处理：
 
-- `200`：读取 `ETag` 和 `Last-Modified`
-- `404`：抛出“远端对象不存在”异常
-- 其他状态码：抛出“查询远端对象元数据失败”异常
+- `200`：读取响应头 `ETag` 和 `Last-Modified`，同时获取响应体（ZIP 字节）
+- `404`：抛出"远端对象不存在"异常
+- 其他状态码：抛出"查询远端对象失败"异常
 
 ### 4.2 本地元数据文件
 
@@ -138,8 +139,8 @@ sandbox:
 ## 8. 错误与边界
 
 - 预签名 URL 为空：参数校验失败
-- HEAD 非 200：元数据查询失败
-- GET 响应为空：下载失败
+- GET 非 200：远端对象查询失败
+- GET 响应体为空：下载失败
 - ZIP 超过 `max-file-size`：拒绝处理
 - ZIP 内无合法 `*.in`：抛出输入数据格式错误
 
@@ -148,9 +149,9 @@ sandbox:
 ## 9. 建议验证步骤
 
 1. 使用私有 bucket 生成 `inputDataUrl` 并请求 `/execute/batch`
-2. 首次请求应触发 HEAD + GET，并写入本地缓存目录
-3. 再次请求同一 URL，应命中缓存（HEAD 后复用本地）
-4. 更新远端 ZIP（ETag 变化）后再请求，应触发重下载
+2. 首次请求应触发 GET 下载 ZIP，并写入本地缓存目录
+3. 再次请求同一 URL，GET 获取元数据后发现版本一致，复用本地缓存
+4. 更新远端 ZIP（ETag 变化）后再请求，GET 获取后发现版本不一致，使用新数据覆盖缓存
 
 ---
 

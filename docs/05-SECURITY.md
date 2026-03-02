@@ -8,95 +8,103 @@
 - **提权攻击**：利用漏洞获取 root 权限
 - **恶意代码**：调用系统命令、访问敏感信息
 
-本文档详细说明如何通过多层防护确保沙箱安全。
+本服务通过多层防护确保沙箱安全：Docker 容器隔离 → 资源限制 → 权限控制 → 危险代码扫描。
 
 ---
 
-## 2. Docker 安全配置
+## 2. Docker 容器安全配置
 
 ### 2.1 核心安全参数
 
-```java
-/**
- * 安全配置构建器
- */
-@Component
-public class SecurityConfigBuilder {
+安全配置在 `ContainerManager.buildHostConfig()` 中集中构建，无独立的安全配置类：
 
-    /**
-     * 构建安全的 HostConfig
-     */
-    public HostConfig buildSecureHostConfig(int memoryMB, boolean enableNetwork) {
-        return HostConfig.newHostConfig()
-                // ============ 资源限制 ============
-                // 内存硬限制
-                .withMemory(memoryMB * 1024L * 1024L)
-                // 禁用 swap（防止绕过内存限制）
-                .withMemorySwap(memoryMB * 1024L * 1024L)
-                // 内存软限制（触发 OOM 优先级）
-                .withMemoryReservation((long) (memoryMB * 0.9 * 1024 * 1024))
-                // CPU 限制（100000 微秒 = 0.1 秒，相当于 10% CPU）
-                .withCpuQuota(100000L)
-                .withCpuPeriod(100000L)
-                // 进程数限制（防止 fork bomb）
-                .withPidsLimit(10L)
-                // 禁用 OOM Killer（让进程被直接终止）
-                .withOomKillDisable(false)
-                
-                // ============ 网络隔离 ============
-                .withNetworkMode(enableNetwork ? "bridge" : "none")
-                
-                // ============ 文件系统安全 ============
-                // 只读根文件系统
-                .withReadonlyRootfs(true)
-                // 可写的临时目录（限制大小，禁止执行）
-                .withTmpFs(Map.of(
-                    "/tmp", "rw,noexec,nosuid,nodev,size=64m",
-                    "/var/tmp", "rw,noexec,nosuid,nodev,size=16m"
-                ))
-                
-                // ============ 权限控制 ============
-                // 禁止获取新权限
-                .withSecurityOpts(List.of("no-new-privileges"))
-                // 删除所有 capabilities
-                .withCapDrop(Capability.ALL)
-                
-                // ============ 用户隔离 ============
-                // 使用 nobody 用户（UID 65534）
-                // 注意：这在 createContainerCmd 中设置
-                
-                // ============ 设备限制 ============
-                .withDevices(List.of())  // 不挂载任何设备
-                
-                // ============ IPC 隔离 ============
-                .withIpcMode("private")
-                
-                // ============ PID 隔离 ============
-                .withPidMode("private");
+```java
+private HostConfig buildHostConfig(String workDir) {
+    long memoryBytes = executionConfig.getMemoryLimit() * 1024L * 1024L;
+    long cpuPeriod = 100000L;
+    long cpuQuota = (long) (cpuPeriod * executionConfig.getCpuLimit());
+
+    HostConfig hostConfig = HostConfig.newHostConfig()
+            // ============ 资源限制 ============
+            .withMemory(memoryBytes)
+            .withMemorySwap(memoryBytes)          // 等于 memory → 禁用 swap
+            .withOomKillDisable(false)              // 允许 OOM Killer 终止
+            .withCpuPeriod(cpuPeriod)
+            .withCpuQuota(cpuQuota)                // cpuLimit * 100000
+            .withPidsLimit((long) executionConfig.getMaxProcesses())
+
+            // ============ 文件系统 ============
+            .withReadonlyRootfs(false)             // 非只读（需要写入编译产物）
+            .withTmpFs(Map.of("/tmp", "rw,noexec,nosuid,size=64m"))
+
+            // ============ 权限控制 ============
+            .withCapDrop(Capability.ALL)           // 删除所有 Linux capabilities
+            .withSecurityOpts(List.of("no-new-privileges:true"))
+
+            // ============ Ulimits ============
+            .withUlimits(List.of(
+                    new Ulimit("nofile", maxOpenFiles, maxOpenFiles),
+                    new Ulimit("nproc", maxProcesses, maxProcesses),
+                    new Ulimit("fsize", outputLimit, outputLimit)
+            ));
+
+    // 卷挂载
+    if (workDir != null) {
+        hostConfig.withBinds(
+                new Bind(workDir, new Volume("/sandbox/workspace")),
+                new Bind("/var/lib/sandbox-inputs", new Volume("/sandbox/inputs"), AccessMode.ro)
+        );
     }
+    return hostConfig;
 }
+```
+
+容器创建时额外设置：
+
+```java
+dockerClient.createContainerCmd(image)
+        .withHostConfig(hostConfig)
+        .withNetworkDisabled(true)               // 完全禁用网络
+        .withWorkingDir("/sandbox/workspace")
+        .withCmd("tail", "-f", "/dev/null")      // 保持容器运行
+        .withStdinOpen(true)
+        .withTty(false)
+        .exec();
+```
+
+Exec 命令中的用户隔离：
+
+```java
+dockerClient.execCreateCmd(containerId)
+        .withUser("sandbox")                     // sandbox 用户 (uid=1000)
+        .withCmd(cmd)
+        .exec();
 ```
 
 ### 2.2 安全参数详解
 
-| 参数 | 作用 | 防护威胁 |
-|------|------|---------|
-| `--memory` | 硬内存限制 | 内存耗尽 |
-| `--memory-swap` | 禁用 swap | 绕过内存限制 |
-| `--pids-limit` | 进程数限制 | fork bomb |
-| `--network=none` | 禁用网络 | 网络攻击、数据泄露 |
-| `--read-only` | 只读文件系统 | 恶意文件写入 |
-| `--cap-drop=ALL` | 删除所有能力 | 提权攻击 |
-| `--security-opt=no-new-privileges` | 禁止提权 | setuid 攻击 |
-| `--user=nobody` | 非 root 运行 | 特权操作 |
+| 参数 | 实际值 | 作用 | 防护威胁 |
+|------|--------|------|---------|
+| `withMemory` | 配置的 memoryLimit (MB) | 硬内存限制 | 内存耗尽 |
+| `withMemorySwap` | 等于 memory | 禁用 swap | 绕过内存限制 |
+| `withPidsLimit` | executionConfig.maxProcesses (1024) | 进程数限制 | fork bomb |
+| `withNetworkDisabled(true)` | true | 完全禁用网络 | 网络攻击、数据泄露 |
+| `withReadonlyRootfs` | **false** | 允许写入 | 需要写入编译产物到工作目录 |
+| `withCapDrop(ALL)` | 删除所有 capabilities | 降权 | 提权攻击 |
+| `no-new-privileges:true` | 防止获取新权限 | 阻止 setuid | setuid 攻击 |
+| `withUser("sandbox")` | uid=1000 | 非 root 运行 | 特权操作 |
+| `withTmpFs` | `/tmp` (64MB, noexec) | 可写临时目录 | 限制临时文件滥用 |
+| `withUlimits` | nofile/nproc/fsize | 资源上限 | 文件描述符/进程/输出耗尽 |
+
+> 注意：根文件系统设为非只读（`readonlyRootfs(false)`），因为代码编译和运行需要在 `/sandbox/workspace` 下写入文件。安全通过其他层（用户隔离、capability 限制、危险代码扫描）保障。
 
 ---
 
 ## 3. Linux Capabilities 控制
 
-### 3.1 Capability 说明
+### 3.1 Capability 删除策略
 
-默认删除的所有 Capabilities：
+使用 `Capability.ALL` 删除所有 capabilities，这是最严格的配置：
 
 | Capability | 功能 | 为何禁用 |
 |------------|------|---------|
@@ -108,687 +116,222 @@ public class SecurityConfigBuilder {
 | `CAP_CHOWN` | 更改所有者 | 权限提升 |
 | `CAP_SETUID/SETGID` | 更改用户 | 身份伪造 |
 | `CAP_KILL` | 发送信号 | 终止其他进程 |
-| `ALL` | 所有能力 | 完全禁用 |
 
-### 3.2 代码实现
-
-```java
-/**
- * Capability 安全配置
- */
-public class CapabilityConfig {
-    
-    /**
-     * 获取需要删除的 Capabilities
-     */
-    public static List<Capability> getDroppedCapabilities() {
-        // 删除所有 - 最安全的选择
-        return List.of(Capability.ALL);
-    }
-    
-    /**
-     * 某些场景可能需要保留的 Capabilities（通常不需要）
-     */
-    public static List<Capability> getAddedCapabilities() {
-        // OJ 沙箱不需要任何额外权限
-        return List.of();
-    }
-}
-```
+> 项目中无独立的 `CapabilityConfig` 类，capability 配置直接在 `ContainerManager` 中设置。
 
 ---
 
-## 4. seccomp 系统调用过滤
+## 4. 用户隔离
 
-### 4.1 seccomp 配置文件
+### 4.1 sandbox 用户
 
-```json
-{
-    "defaultAction": "SCMP_ACT_ERRNO",
-    "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86"],
-    "syscalls": [
-        {
-            "names": [
-                "read", "write", "close", "fstat", "lseek",
-                "mmap", "mprotect", "munmap", "brk",
-                "ioctl", "access", "pipe", "select",
-                "sched_yield", "nanosleep", "alarm",
-                "getpid", "gettid", "getuid", "getgid",
-                "exit", "exit_group", "uname",
-                "fcntl", "flock", "fsync",
-                "getcwd", "chdir", "readlink",
-                "stat", "lstat", "poll", "ppoll",
-                "clock_gettime", "clock_getres",
-                "futex", "set_robust_list",
-                "arch_prctl", "set_tid_address",
-                "pread64", "pwrite64", "readv", "writev",
-                "mremap", "rt_sigaction", "rt_sigprocmask",
-                "rt_sigreturn", "sigaltstack",
-                "prctl", "getrlimit", "setrlimit",
-                "dup", "dup2", "dup3", "pipe2",
-                "epoll_create", "epoll_create1", "epoll_ctl",
-                "epoll_wait", "epoll_pwait",
-                "openat", "newfstatat", "faccessat",
-                "getrandom", "memfd_create",
-                "clone", "fork", "vfork", "wait4", "waitid"
-            ],
-            "action": "SCMP_ACT_ALLOW"
-        },
-        {
-            "names": [
-                "execve"
-            ],
-            "action": "SCMP_ACT_ALLOW",
-            "comment": "只允许执行一次（启动程序）"
-        },
-        {
-            "names": [
-                "socket", "connect", "accept", "bind", "listen",
-                "sendto", "recvfrom", "sendmsg", "recvmsg"
-            ],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": 1,
-            "comment": "禁止网络系统调用"
-        },
-        {
-            "names": [
-                "ptrace", "process_vm_readv", "process_vm_writev"
-            ],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": 1,
-            "comment": "禁止进程调试"
-        },
-        {
-            "names": [
-                "mount", "umount2", "pivot_root", "chroot"
-            ],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": 1,
-            "comment": "禁止文件系统操作"
-        },
-        {
-            "names": [
-                "init_module", "finit_module", "delete_module"
-            ],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": 1,
-            "comment": "禁止内核模块操作"
-        },
-        {
-            "names": [
-                "reboot", "sethostname", "setdomainname",
-                "kexec_load", "kexec_file_load"
-            ],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": 1,
-            "comment": "禁止系统管理操作"
-        }
-    ]
-}
+自定义沙箱镜像（`sandbox-base`）中创建 `sandbox` 用户：
+
+```dockerfile
+RUN groupadd -g 1000 sandbox && \
+    useradd -u 1000 -g sandbox -d /sandbox -s /bin/bash sandbox && \
+    mkdir -p /sandbox/workspace && \
+    chown -R sandbox:sandbox /sandbox
 ```
 
-### 4.2 应用 seccomp 配置
+- 用户：`sandbox` (uid=1000, gid=1000)
+- Home 目录：`/sandbox`
+- 工作目录：`/sandbox/workspace`
+- exec 命令通过 `.withUser("sandbox")` 以该用户执行
 
-```java
-/**
- * 使用自定义 seccomp 配置
- */
-public HostConfig buildHostConfigWithSeccomp(String seccompProfilePath) {
-    return HostConfig.newHostConfig()
-            // ... 其他配置 ...
-            .withSecurityOpts(List.of(
-                "no-new-privileges",
-                "seccomp=" + seccompProfilePath
-            ));
-}
+### 4.2 容器内部权限结构
+
 ```
-
-### 4.3 Docker 默认 seccomp 说明
-
-Docker 默认已启用 seccomp，禁止了约 44 个危险系统调用：
-- `reboot`, `settimeofday`
-- `mount`, `umount`
-- `init_module`, `delete_module`
-- `acct`, `swapon`, `swapoff`
-- 等等
-
-对于 OJ 沙箱，默认配置通常足够，但可以根据需要加强。
+/ (root owned)
+├── sandbox/
+│   └── workspace/     (sandbox:sandbox, rw)
+│       └── job-{id}/  (sandbox:sandbox, rw) ← 用户代码在此执行
+├── tmp/               (tmpfs, 64MB, noexec)
+└── sandbox/inputs/    (readonly bind mount)
+```
 
 ---
 
 ## 5. 危险代码检测
 
-### 5.1 代码扫描器
+### 5.1 架构设计
+
+危险代码扫描**集成在语言策略中**，每种语言的 `LanguageStrategy` 实现定义自己的 `getDangerousPatterns()`。无独立的 `DangerousCodeScanner` 组件。
 
 ```java
-package com.github.ezzziy.codesandbox.security;
+// LanguageStrategy 接口
+public interface LanguageStrategy {
+    /** 获取危险代码正则模式列表 */
+    List<Pattern> getDangerousPatterns();
 
-import com.github.ezzziy.codesandbox.exception.DangerousCodeException;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Pattern;
-
-/**
- * 危险代码扫描器
- */
-@Slf4j
-@Component
-public class DangerousCodeScanner {
-
-    /**
-     * 各语言的危险模式
-     */
-    private static final Map<String, List<DangerPattern>> LANGUAGE_PATTERNS = Map.of(
-        "c", List.of(
-            new DangerPattern("system\\s*\\(", "禁止使用 system() 函数"),
-            new DangerPattern("popen\\s*\\(", "禁止使用 popen() 函数"),
-            new DangerPattern("exec[lvpe]*\\s*\\(", "禁止使用 exec 系列函数"),
-            new DangerPattern("fork\\s*\\(", "禁止使用 fork() 函数"),
-            new DangerPattern("#include\\s*<sys/socket\\.h>", "禁止使用网络头文件"),
-            new DangerPattern("#include\\s*<netinet/", "禁止使用网络头文件"),
-            new DangerPattern("#include\\s*<arpa/", "禁止使用网络头文件"),
-            new DangerPattern("__asm__", "禁止使用内联汇编"),
-            new DangerPattern("asm\\s*\\(", "禁止使用内联汇编"),
-            new DangerPattern("/etc/passwd", "禁止访问系统文件"),
-            new DangerPattern("/etc/shadow", "禁止访问系统文件")
-        ),
-        
-        "cpp", List.of(
-            new DangerPattern("system\\s*\\(", "禁止使用 system() 函数"),
-            new DangerPattern("popen\\s*\\(", "禁止使用 popen() 函数"),
-            new DangerPattern("exec[lvpe]*\\s*\\(", "禁止使用 exec 系列函数"),
-            new DangerPattern("fork\\s*\\(", "禁止使用 fork() 函数"),
-            new DangerPattern("#include\\s*<sys/socket\\.h>", "禁止使用网络头文件"),
-            new DangerPattern("__asm__", "禁止使用内联汇编"),
-            new DangerPattern("asm\\s*\\(", "禁止使用内联汇编"),
-            new DangerPattern("asm\\s+volatile", "禁止使用内联汇编")
-        ),
-        
-        "java", List.of(
-            new DangerPattern("Runtime\\.getRuntime\\(\\)\\.exec", "禁止执行系统命令"),
-            new DangerPattern("ProcessBuilder", "禁止创建进程"),
-            new DangerPattern("java\\.net\\.", "禁止使用网络类"),
-            new DangerPattern("java\\.io\\.File(?!Reader|Writer|InputStream|OutputStream)", "限制文件操作"),
-            new DangerPattern("java\\.lang\\.reflect\\.", "禁止使用反射"),
-            new DangerPattern("Class\\.forName\\(", "禁止动态加载类"),
-            new DangerPattern("setAccessible\\(true\\)", "禁止绕过访问控制"),
-            new DangerPattern("System\\.exit\\(", "禁止调用 System.exit"),
-            new DangerPattern("SecurityManager", "禁止操作安全管理器"),
-            new DangerPattern("\\.loadLibrary\\(", "禁止加载本地库"),
-            new DangerPattern("\\.load\\(", "禁止加载本地库"),
-            new DangerPattern("native\\s+", "禁止使用 native 方法")
-        ),
-        
-        "python", List.of(
-            new DangerPattern("os\\.system\\(", "禁止执行系统命令"),
-            new DangerPattern("os\\.popen\\(", "禁止执行系统命令"),
-            new DangerPattern("os\\.exec[lvpe]*\\(", "禁止执行系统命令"),
-            new DangerPattern("subprocess\\.", "禁止使用 subprocess"),
-            new DangerPattern("commands\\.", "禁止使用 commands 模块"),
-            new DangerPattern("import\\s+socket", "禁止导入 socket"),
-            new DangerPattern("from\\s+socket\\s+import", "禁止导入 socket"),
-            new DangerPattern("import\\s+urllib", "禁止导入网络库"),
-            new DangerPattern("import\\s+requests", "禁止导入网络库"),
-            new DangerPattern("import\\s+http", "禁止导入网络库"),
-            new DangerPattern("eval\\(", "禁止使用 eval"),
-            new DangerPattern("exec\\(", "禁止使用 exec"),
-            new DangerPattern("compile\\(", "禁止使用 compile"),
-            new DangerPattern("__import__\\(", "禁止使用 __import__"),
-            new DangerPattern("open\\([^)]*['\"]/(etc|proc|sys|dev)", "禁止访问系统目录"),
-            new DangerPattern("ctypes\\.", "禁止使用 ctypes"),
-            new DangerPattern("multiprocessing\\.", "禁止使用多进程")
-        ),
-        
-        "golang", List.of(
-            new DangerPattern("os/exec", "禁止导入 os/exec"),
-            new DangerPattern("exec\\.Command\\(", "禁止执行命令"),
-            new DangerPattern("syscall\\.", "禁止使用 syscall"),
-            new DangerPattern("net\\.", "禁止使用网络"),
-            new DangerPattern("net/http", "禁止使用 HTTP"),
-            new DangerPattern("unsafe\\.", "禁止使用 unsafe"),
-            new DangerPattern("reflect\\.(?!TypeOf|ValueOf)", "限制反射使用"),
-            new DangerPattern("os\\.(?!Stdin|Stdout|Stderr)", "限制 os 包使用"),
-            new DangerPattern("plugin\\.", "禁止使用插件"),
-            new DangerPattern("cgo", "禁止使用 CGO")
-        )
-    );
-
-    /**
-     * 扫描代码中的危险模式
-     */
-    public void scan(String language, String code) {
-        List<DangerPattern> patterns = LANGUAGE_PATTERNS.get(language.toLowerCase());
-        if (patterns == null) {
-            log.warn("未找到语言 {} 的安全规则", language);
-            return;
-        }
-
-        for (DangerPattern pattern : patterns) {
-            if (pattern.matches(code)) {
-                log.warn("检测到危险代码: language={}, pattern={}, reason={}", 
-                        language, pattern.pattern, pattern.reason);
-                throw new DangerousCodeException(pattern.reason);
+    /** 检查代码是否包含危险模式 */
+    default String checkDangerousCode(String code) {
+        for (Pattern pattern : getDangerousPatterns()) {
+            if (pattern.matcher(code).find()) {
+                return pattern.pattern();
             }
         }
-        
-        log.debug("代码安全检查通过: language={}", language);
-    }
-
-    /**
-     * 危险模式定义
-     */
-    private record DangerPattern(String pattern, String reason) {
-        private static final Map<String, Pattern> COMPILED_PATTERNS = 
-                new java.util.concurrent.ConcurrentHashMap<>();
-
-        public boolean matches(String code) {
-            Pattern compiled = COMPILED_PATTERNS.computeIfAbsent(
-                    pattern, 
-                    p -> Pattern.compile(p, Pattern.CASE_INSENSITIVE | Pattern.MULTILINE)
-            );
-            return compiled.matcher(code).find();
-        }
+        return null;  // null 表示安全
     }
 }
 ```
 
 ### 5.2 在执行流程中集成
 
+扫描在 `DockerCodeExecutor` 中触发，受 `executionConfig.isEnableCodeScan()` 开关控制：
+
 ```java
-@Service
-@RequiredArgsConstructor
-public class ExecutionServiceImpl implements ExecutionService {
-
-    private final DangerousCodeScanner codeScanner;
-    private final CodeExecutor executor;
-
-    @Override
-    public ExecutionResult execute(ExecuteRequest request) {
-        // 1. 代码安全扫描
-        codeScanner.scan(request.getLanguage(), request.getCode());
-        
-        // 2. 继续执行...
-        return executor.execute(buildContext(request));
+// DockerCodeExecutor.execute() 中
+if (executionConfig.isEnableCodeScan()) {
+    String dangerousPattern = strategy.checkDangerousCode(code);
+    if (dangerousPattern != null) {
+        throw new DangerousCodeException(
+            "检测到危险代码模式: " + dangerousPattern, requestId);
     }
 }
+```
+
+### 5.3 各语言危险模式概览
+
+| 语言 | 拦截类别 | 典型模式 | 模式数量 |
+|------|---------|---------|---------|
+| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件, mmap | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>`, `ptrace()` | ~30 |
+| C++ | 同 C + C++ 特有 | `std::thread`, `std::async`, `std::future`, `std::filesystem` | ~30 |
+| Java 8/17 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe | `Runtime.getRuntime()`, `Class.forName()`, `System.exit`, `Thread.sleep` | ~35 |
+| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle | `os.system()`, `subprocess`, `eval()`, `socket`, `__import__()` | ~35 |
+
+### 5.4 C/C++ 危险模式详情
+
+```java
+// CLanguageStrategy.DANGEROUS_PATTERNS（部分）
+Pattern.compile("\\bsystem\\s*\\("),       // 系统命令执行
+Pattern.compile("\\bexec[lv]?[pe]?\\s*\\("), // exec 族函数
+Pattern.compile("\\bfork\\s*\\("),         // 创建子进程
+Pattern.compile("\\bsocket\\s*\\("),       // 网络 socket
+Pattern.compile("\\b__asm__\\b"),          // 内联汇编
+Pattern.compile("\\basm\\s*\\("),          // 内联汇编
+Pattern.compile("#include\\s*<sys/socket\\.h>"),  // 网络头文件
+Pattern.compile("\\bptrace\\s*\\("),       // 进程追踪
+Pattern.compile("\\bmmap\\s*\\("),         // 内存映射
+Pattern.compile("\\bdlopen\\s*\\("),       // 动态库加载
+```
+
+### 5.5 Java 危险模式详情
+
+```java
+// Java8LanguageStrategy.DANGEROUS_PATTERNS（部分）
+Pattern.compile("Runtime\\.getRuntime\\(\\)"),   // 命令执行
+Pattern.compile("ProcessBuilder"),               // 进程构建器
+Pattern.compile("Class\\.forName\\s*\\("),       // 反射加载
+Pattern.compile("setAccessible\\s*\\(\\s*true"), // 绕过访问控制
+Pattern.compile("System\\.exit"),                // 退出 JVM
+Pattern.compile("Thread\\.sleep\\s*\\("),        // 休眠（可用于计时攻击）
+Pattern.compile("System\\.loadLibrary"),         // JNI 加载
+Pattern.compile("sun\\.misc\\.Unsafe"),          // Unsafe 操作
+Pattern.compile("import\\s+java\\.net\\."),      // 网络类导入
+Pattern.compile("ClassLoader"),                  // 类加载器
+```
+
+### 5.6 Python 危险模式详情
+
+```java
+// Python3LanguageStrategy.DANGEROUS_PATTERNS（部分）
+Pattern.compile("\\bos\\.system\\s*\\("),        // 系统命令
+Pattern.compile("\\bsubprocess\\."),             // subprocess 模块
+Pattern.compile("\\beval\\s*\\("),               // eval 执行
+Pattern.compile("\\bexec\\s*\\("),               // exec 执行
+Pattern.compile("\\bsocket\\.socket\\s*\\("),    // 网络 socket
+Pattern.compile("import\\s+ctypes"),             // C 类型接口
+Pattern.compile("import\\s+multiprocessing"),    // 多进程
+Pattern.compile("\\bpickle\\.loads?\\s*\\("),    // pickle 反序列化
+Pattern.compile("\\b__import__\\s*\\("),         // 动态导入
 ```
 
 ---
 
-## 6. 资源限制实现
+## 6. 资源限制
 
-### 6.1 内存限制
+### 6.1 限制参数（来自 ExecutionConfig）
 
-```java
-/**
- * 内存限制配置
- */
-public class MemoryLimiter {
-    
-    /**
-     * 计算容器内存限制
-     * @param requestedMB 请求的内存（MB）
-     * @param maxMB 最大允许（MB）
-     * @return 实际限制（字节）
-     */
-    public long calculateMemoryLimit(int requestedMB, int maxMB) {
-        int actualMB = Math.min(requestedMB, maxMB);
-        return actualMB * 1024L * 1024L;
-    }
-    
-    /**
-     * 判断是否内存超限
-     */
-    public boolean isMemoryExceeded(long usedBytes, int limitMB) {
-        return usedBytes > limitMB * 1024L * 1024L;
-    }
-}
-```
+| 资源 | 配置项 | 默认值 | 实现方式 |
+|------|--------|--------|---------|
+| 内存 | `memoryLimit` | 256 MB | Docker `--memory` + `--memory-swap` |
+| CPU | `cpuLimit` | 1.0 核 | Docker `--cpu-period` + `--cpu-quota` |
+| 编译超时 | `compileTimeout` | 30 秒 | Docker exec timeout |
+| 运行超时 | `runTimeout` | 10 秒 | Docker exec timeout |
+| 总超时 | `totalTimeout` | 300 秒 | 全流程超时 |
+| 进程数 | `maxProcesses` | 1024 | Docker `--pids-limit` + ulimit nproc |
+| 文件描述符 | `maxOpenFiles` | 256 | ulimit nofile |
+| 输出大小 | `outputLimit` | 65536 字节 | ulimit fsize + 代码层截断 |
 
-### 6.2 时间限制
+### 6.2 时间测量
 
-```java
-/**
- * 时间限制实现
- */
-public class TimeLimiter {
-
-    /**
-     * 带超时的执行
-     */
-    public <T> T executeWithTimeout(Callable<T> task, long timeoutMs) 
-            throws TimeoutException, ExecutionException, InterruptedException {
-        
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        Future<T> future = executor.submit(task);
-        
-        try {
-            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            future.cancel(true);
-            throw e;
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-    
-    /**
-     * 使用 timeout 命令（Linux）
-     */
-    public String[] wrapWithTimeout(String[] command, long timeoutSeconds) {
-        String cmd = String.join(" ", command);
-        return new String[]{
-            "/bin/sh", "-c",
-            String.format("timeout -s KILL %d %s", timeoutSeconds, cmd)
-        };
-    }
-}
-```
-
-### 6.3 输出限制
-
-```java
-/**
- * 输出限制
- */
-public class OutputLimiter {
-    
-    private static final int MAX_OUTPUT_SIZE = 64 * 1024;  // 64KB
-    
-    /**
-     * 限制输出大小
-     */
-    public String limitOutput(String output) {
-        if (output == null) return "";
-        
-        if (output.length() > MAX_OUTPUT_SIZE) {
-            return output.substring(0, MAX_OUTPUT_SIZE) + 
-                   "\n... [OUTPUT TRUNCATED - exceeded 64KB limit]";
-        }
-        return output;
-    }
-    
-    /**
-     * 带流式限制的输出收集器
-     */
-    public static class LimitedOutputStream extends OutputStream {
-        
-        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        private final int maxSize;
-        private boolean truncated = false;
-        
-        public LimitedOutputStream(int maxSize) {
-            this.maxSize = maxSize;
-        }
-        
-        @Override
-        public void write(int b) throws IOException {
-            if (buffer.size() < maxSize) {
-                buffer.write(b);
-            } else {
-                truncated = true;
-            }
-        }
-        
-        public String getOutput() {
-            String output = buffer.toString(StandardCharsets.UTF_8);
-            if (truncated) {
-                output += "\n... [OUTPUT TRUNCATED]";
-            }
-            return output;
-        }
-        
-        public boolean isTruncated() {
-            return truncated;
-        }
-    }
-}
-```
-
----
-
-## 7. Fork Bomb 防护
-
-### 7.1 进程数限制
+运行时间通过 shell 脚本在容器内精确测量（纳秒精度）：
 
 ```bash
-# Docker --pids-limit 参数
-docker run --pids-limit=10 ...
+START=$(date +%s%N); <command>; EXIT_CODE=$?; END=$(date +%s%N);
+echo '__EXEC_TIME_NS__:'$((END-START))
 ```
 
-### 7.2 测试 Fork Bomb 防护
+`DockerCodeExecutor` 从 stdout 提取时间标记并转换为毫秒。
 
-```c
-// C 语言 fork bomb 测试
-#include <unistd.h>
-int main() {
-    while(1) fork();  // 无限创建进程
-    return 0;
-}
-```
+### 6.3 内存测量
 
-预期行为：
-- 创建约 10 个进程后，fork() 返回 -1 (EAGAIN)
-- 进程总数不会超过限制
-- 系统稳定运行
-
-### 7.3 ulimit 作为后备
-
-```java
-/**
- * 在容器中设置 ulimit
- */
-public String[] wrapWithUlimit(String[] command) {
-    String cmd = String.join(" ", command);
-    return new String[]{
-        "/bin/sh", "-c",
-        "ulimit -u 10 && " + cmd  // 限制用户进程数
-    };
-}
-```
-
----
-
-## 8. 网络隔离
-
-### 8.1 Docker 网络配置
-
-```java
-// 完全禁用网络
-HostConfig.newHostConfig()
-    .withNetworkMode("none")
-```
-
-### 8.2 iptables 规则（额外防护）
+使用 `/usr/bin/time -f '%M' -o $MEMFILE` 在容器内捕获 RSS 峰值（KB）：
 
 ```bash
-# 在宿主机上阻止沙箱容器的网络访问
-iptables -I DOCKER-USER -i br-sandbox -j DROP
-iptables -I DOCKER-USER -o br-sandbox -j DROP
+MEMFILE=/tmp/mem_$$;
+/usr/bin/time -f '%M' -o $MEMFILE sh -c 'exec <command>';
+MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE;
+echo '__EXEC_MEM_KB__:'$MEM
 ```
 
-### 8.3 网络隔离验证
-
-```python
-# Python 网络测试代码
-import socket
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect(("8.8.8.8", 53))
-    print("ERROR: Network should be disabled!")
-except Exception as e:
-    print("OK: Network is disabled:", e)
-```
-
-预期输出：`OK: Network is disabled: [Errno 101] Network is unreachable`
+内存值写入临时文件 `$MEMFILE`，不污染 stdout/stderr。
 
 ---
 
-## 9. 文件系统安全
-
-### 9.1 只读根文件系统
+## 7. 网络隔离
 
 ```java
-HostConfig.newHostConfig()
-    .withReadonlyRootfs(true)
-    .withTmpFs(Map.of(
-        "/tmp", "rw,noexec,nosuid,nodev,size=64m",
-        "/workspace", "rw,noexec,nosuid,nodev,size=128m"
-    ))
+// ContainerManager 创建容器时
+.withNetworkDisabled(true)
 ```
 
-### 9.2 挂载选项说明
-
-| 选项 | 作用 |
-|------|------|
-| `rw` | 可读写 |
-| `noexec` | 禁止执行二进制文件 |
-| `nosuid` | 忽略 setuid 位 |
-| `nodev` | 禁止设备文件 |
-| `size=64m` | 限制大小 64MB |
-
-### 9.3 路径黑名单
-
-```java
-/**
- * 检查路径是否安全
- */
-public class PathValidator {
-    
-    private static final List<String> FORBIDDEN_PATHS = List.of(
-        "/etc/passwd",
-        "/etc/shadow",
-        "/etc/hosts",
-        "/proc",
-        "/sys",
-        "/dev",
-        "/root",
-        "/home",
-        "/var/run/docker.sock"
-    );
-    
-    public boolean isPathSafe(String path) {
-        String normalized = normalizePath(path);
-        return FORBIDDEN_PATHS.stream()
-                .noneMatch(normalized::startsWith);
-    }
-    
-    private String normalizePath(String path) {
-        try {
-            return new File(path).getCanonicalPath();
-        } catch (IOException e) {
-            return path;
-        }
-    }
-}
-```
+同时 `--cap-drop ALL` 也移除了 `CAP_NET_RAW` 等网络相关 capability。
 
 ---
 
-## 10. 安全审计日志
+## 8. 安全检查清单
 
-### 10.1 审计事件记录
+### 8.1 当前已实现的安全措施
 
-```java
-package com.github.ezzziy.codesandbox.security;
+- [x] `--cap-drop=ALL` — 删除所有 Linux capabilities
+- [x] `--security-opt=no-new-privileges:true` — 禁止获取新权限
+- [x] `--network-disabled` — 完全禁用网络
+- [x] `--memory` + `--memory-swap` — 内存限制 + 禁用 swap
+- [x] `--pids-limit` — 进程数限制（防 fork bomb）
+- [x] ulimits (nofile, nproc, fsize) — 资源上限
+- [x] tmpfs `/tmp` (noexec, 64MB) — 可写但不可执行的临时目录
+- [x] `sandbox` 用户 (uid=1000) — 非 root 执行
+- [x] 各语言危险代码正则扫描（可通过 `enableCodeScan` 开关）
+- [x] Docker 默认 seccomp 配置
+- [x] `DangerousCodeException` 异常处理
+- [x] 只读输入数据挂载（`/sandbox/inputs` 以 `AccessMode.ro` 挂载）
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
+### 8.2 注意事项
 
-@Slf4j
-@Component
-@RequiredArgsConstructor
-public class SecurityAuditLogger {
-
-    /**
-     * 记录执行请求
-     */
-    public void logExecutionRequest(String executionId, String language, 
-                                    String clientIp, int codeLength) {
-        log.info("[AUDIT] EXEC_REQUEST executionId={} language={} clientIp={} codeLength={}",
-                executionId, language, clientIp, codeLength);
-    }
-
-    /**
-     * 记录安全违规
-     */
-    public void logSecurityViolation(String executionId, String violationType, 
-                                     String details) {
-        log.warn("[AUDIT] SECURITY_VIOLATION executionId={} type={} details={}",
-                executionId, violationType, details);
-    }
-
-    /**
-     * 记录资源超限
-     */
-    public void logResourceExceeded(String executionId, String resourceType,
-                                    long used, long limit) {
-        log.warn("[AUDIT] RESOURCE_EXCEEDED executionId={} resource={} used={} limit={}",
-                executionId, resourceType, used, limit);
-    }
-
-    /**
-     * 记录执行完成
-     */
-    public void logExecutionCompleted(String executionId, String status, 
-                                      long duration) {
-        log.info("[AUDIT] EXEC_COMPLETED executionId={} status={} duration={}ms",
-                executionId, status, duration);
-    }
-}
-```
-
-### 10.2 日志格式示例
-
-```
-2024-01-15 10:30:15.123 INFO  [AUDIT] EXEC_REQUEST executionId=exec-abc123 language=cpp clientIp=192.168.1.100 codeLength=512
-2024-01-15 10:30:15.456 WARN  [AUDIT] SECURITY_VIOLATION executionId=exec-abc123 type=DANGEROUS_CODE details=检测到 system() 函数调用
-2024-01-15 10:30:20.789 WARN  [AUDIT] RESOURCE_EXCEEDED executionId=exec-def456 resource=MEMORY used=274877906944 limit=268435456
-2024-01-15 10:30:25.012 INFO  [AUDIT] EXEC_COMPLETED executionId=exec-ghi789 status=ACCEPTED duration=1234ms
-```
+- `readonlyRootfs` 设为 `false`，因为编译和运行需要写入 `/sandbox/workspace`
+- Docker 默认 seccomp 已禁止约 44 个危险系统调用（reboot, mount, module 等）
+- 项目中无独立的 `SecurityConfigBuilder`、`SecurityAuditLogger`、`PathValidator` 类
+- 无自定义 seccomp profile 文件，依赖 Docker 默认
 
 ---
 
-## 11. 安全检查清单
-
-### 11.1 部署前检查
-
-- [ ] Docker 版本 >= 20.10
-- [ ] 已启用 Docker seccomp
-- [ ] 已配置资源限制
-- [ ] 已禁用 Docker remote API 或已加密
-- [ ] 宿主机内核版本支持 cgroups v2
-- [ ] 已创建非 root 运行用户
-
-### 11.2 配置检查
-
-- [ ] `--network=none` 已配置
-- [ ] `--read-only` 已配置
-- [ ] `--cap-drop=ALL` 已配置
-- [ ] `--pids-limit` 已配置
-- [ ] `--memory` 和 `--memory-swap` 已配置
-- [ ] `--security-opt=no-new-privileges` 已配置
-
-### 11.3 运行时检查
-
-- [ ] 危险代码扫描已启用
-- [ ] 审计日志已启用
-- [ ] 超时机制已实现
-- [ ] 清理机制已实现
-- [ ] 错误处理已完善
-
----
-
-## 12. 下一步
+## 9. 下一步
 
 下一篇文档将详细介绍 **缓存与 OSS 集成**，包括：
 - 本地文件缓存设计
-- OSS 客户端实现
-- 缓存刷新机制
-- 性能优化
+- InputDataService 实现
+- 远程数据下载与缓存
 
 详见 [06-CACHE-OSS.md](06-CACHE-OSS.md)

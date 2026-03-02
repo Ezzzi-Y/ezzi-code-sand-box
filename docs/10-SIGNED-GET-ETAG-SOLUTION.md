@@ -1,8 +1,9 @@
 # 输入数据 URL（签名绑定 GET）下的 ETAG 获取方案与实施计划
 
-> 状态：**待实施**  
+> 状态：**✅ 已实施**  
 > 日期：2026-02-28  
-> 决策：**采用方案一（统一使用 GET 获取 ETAG）**
+> 决策：**采用方案一（统一使用 GET 获取 ETAG）**  
+> 完成说明：`InputDataServiceImpl.fetchRemoteObject()` 已使用 `HttpRequest.get()` 统一获取元数据和 ZIP 内容，不再发起 HEAD 请求。
 
 ---
 

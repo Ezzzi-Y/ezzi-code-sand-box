@@ -15,23 +15,24 @@
 
 | 组件 | 技术选型 | 版本 |
 |------|---------|------|
-| 运行时 | Java | 17+ |
-| 框架 | Spring Boot | 3.x |
+| 运行时 | Java | 21 |
+| 框架 | Spring Boot | 3.5.x |
 | 容器化 | Docker | 20.10+ |
-| Docker 交互 | docker-java | 3.3.x |
-| HTTP 客户端 | Hutool HttpUtil | 5.8.x |
+| Docker 交互 | docker-java + zerodep transport | 3.3.4 |
+| HTTP 客户端 | Hutool HttpRequest | 5.8.38 |
 | 本地缓存 | 磁盘文件缓存（InputDataService） | - |
-| 工具库 | Hutool | 5.8.x |
+| 工具库 | Hutool | 5.8.38 |
+| 压缩 | Apache Commons Compress | 1.26.0 |
 
 ### 1.3 支持的编程语言
 
-| 语言 | 版本 | 编译命令 | 执行命令 |
-|------|------|---------|---------|
-| C | GCC 11 | `gcc -O2 -std=c11 -o main main.c` | `./main` |
-| C++ | G++ 11 | `g++ -O2 -std=c++11 -o main main.cpp` | `./main` |
-| Java | 8 | `javac -encoding UTF-8 Main.java` | `java -Xmx{mem}m Main` |
-| Java | 11 | `javac -encoding UTF-8 Main.java` | `java -Xmx{mem}m Main` |
-| Python | 3.10 | - | `python3 main.py` |
+| 语言 | 枚举标识 | Docker 镜像 | 编译命令 | 执行命令 |
+|------|---------|-------------|---------|---------|
+| C | `c` | `sandbox-gcc:latest` | `gcc -std=c11 -O2 -Wall -Wextra -fno-asm -lm -o main main.c` | `./main` |
+| C++ | `cpp11` | `sandbox-gcc:latest` | `g++ -std=c++11 -O2 -Wall -Wextra -fno-asm -o main main.cpp` | `./main` |
+| Java 8 | `java8` | `sandbox-java8:latest` | `javac -encoding UTF-8 -d . Main.java` | `java -Xmx256m -Xms64m -Djava.security.manager=default -cp . Main` |
+| Java 17 | `java17` | `sandbox-java17:latest` | `javac -encoding UTF-8 -d . Main.java` | `java -Xmx256m -Xms64m -XX:+UseG1GC -cp . Main` |
+| Python 3 | `python3` | `sandbox-python:latest` | - | `python3 -u main.py` |
 
 ---
 
@@ -46,29 +47,31 @@
 │                              OJ 判题服务                                      │
 │                         (backend-tyut-oj)                                   │
 └─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │ HTTP/RPC
+                                  │ HTTP
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           代码沙箱服务                                        │
-│                         (code-sand-box)                                     │
+│                     (ezzi-code-sand-box :6060)                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                         API Layer                                    │   │
-│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ ExecuteController│                       │ HealthController │  │   │
-│  │  └────────┬─────────┘                       └──────────────────┘  │   │
-│  └───────────┼──────────────────────┼──────────────────────────────────┘   │
-│              │                                                          │
+│  │  ┌──────────────────┐                     ┌──────────────────┐     │   │
+│  │  │ ExecuteController│                     │ HealthController │     │   │
+│  │  │ /execute/*       │                     │ /health/*        │     │   │
+│  │  └────────┬─────────┘                     └──────────────────┘     │   │
+│  └───────────┼─────────────────────────────────────────────────────────┘   │
+│              │                                                              │
 │  ┌───────────▼──────────────────────────────────────────────────────────┐   │
 │  │                        Service Layer                                 │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ ExecutionService │  │ InputDataService │  │LanguageRegistry  │  │   │
+│  │  │ExecutionService  │  │ InputDataService │  │LanguageStrategy  │  │   │
+│  │  │  Impl            │  │  Impl            │  │  Factory         │  │   │
 │  │  └────────┬─────────┘  └────────┬─────────┘  └──────────────────┘  │   │
 │  └───────────┼──────────────────────┼──────────────────────────────────┘   │
 │              │                      │                                       │
 │  ┌───────────▼──────────────────────▼──────────────────────────────────┐   │
 │  │                       Core Layer                                     │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
-│  │  │ DockerExecutor   │  │ InputDataService │  │  TestCaseService │  │   │
+│  │  │DockerCodeExecutor│  │ ContainerManager │  │  ContainerPool   │  │   │
 │  │  └────────┬─────────┘  └──────────────────┘  └──────────────────┘  │   │
 │  └───────────┼──────────────────────────────────────────────────────────┘   │
 │              │                                                              │
@@ -76,7 +79,7 @@
 │  │                      Infrastructure Layer                            │   │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │   │
 │  │  │  Docker Engine   │  │  Local Disk Cache│  │  HTTP Download   │  │   │
-│  │  │   (容器运行时)     │  │ (_meta+*.in 文件) │  │  (预签名URL)      │  │   │
+│  │  │   (容器运行时)     │  │ (_meta+*.in 文件) │  │  (预签名URL GET) │  │   │
 │  │  └──────────────────┘  └──────────────────┘  └──────────────────┘  │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -85,57 +88,54 @@
 ### 2.2 执行时序图
 
 ```
-┌──────┐     ┌──────────┐    ┌───────────┐    ┌─────────────┐   ┌──────┐    ┌───────┐
-│Client│     │Controller│    │ ExecService│    │InputDataService│ │Executor│  │Docker │
-└──┬───┘     └────┬─────┘    └─────┬─────┘    └──────┬──────┘   └───┬───┘   └───┬───┘
-   │              │                │               │             │           │
-   │ POST /execute│                │               │             │           │
-   │─────────────>│                │               │             │           │
-   │              │                │               │             │           │
-   │              │  execute(req)  │               │             │           │
-   │              │───────────────>│               │             │           │
-   │              │                │               │             │           │
-  │              │                │ getInputDataSet()          │           │
-   │              │                │──────────────>│             │           │
-   │              │                │               │             │           │
-  │              │                │               │─┐           │           │
-  │              │                │               │ │ HEAD(预签名URL)       │
-  │              │                │               │<┘           │           │
-   │              │                │               │             │           │
-  │              │                │               │ (缓存未命中) │           │
-   │              │                │               │────────>HTTP Download   │
-   │              │                │               │<────────(预签名URL)      │
-   │              │                │               │             │           │
-   │              │                │  inputData    │             │           │
-   │              │                │<──────────────│             │           │
-   │              │                │               │             │           │
-   │              │                │       run(code, input)      │           │
-   │              │                │─────────────────────────────>│           │
-   │              │                │               │             │           │
-   │              │                │               │             │ create    │
-   │              │                │               │             │──────────>│
-   │              │                │               │             │           │
-   │              │                │               │             │ compile   │
-   │              │                │               │             │──────────>│
-   │              │                │               │             │           │
-   │              │                │               │             │ execute   │
-   │              │                │               │             │──────────>│
-   │              │                │               │             │           │
-   │              │                │               │             │<──────────│
-   │              │                │               │             │  result   │
-   │              │                │               │             │           │
-   │              │                │               │             │ remove    │
-   │              │                │               │             │──────────>│
-   │              │                │               │             │           │
-   │              │                │     ExecutionResult         │           │
-   │              │                │<────────────────────────────│           │
-   │              │                │               │             │           │
-   │              │   result       │               │             │           │
-   │              │<───────────────│               │             │           │
-   │              │                │               │             │           │
-   │   response   │                │               │             │           │
-   │<─────────────│                │               │             │           │
-   │              │                │               │             │           │
+┌──────┐     ┌──────────┐    ┌───────────┐    ┌─────────────────┐   ┌────────────┐   ┌──────────┐  ┌──────┐
+│Client│     │Controller│    │ ExecService│    │InputDataService │   │ContainerPool│  │Executor  │  │Docker│
+└──┬───┘     └────┬─────┘    └─────┬─────┘    └──────┬──────────┘   └─────┬──────┘  └────┬─────┘  └──┬───┘
+   │              │                │                  │                    │              │           │
+   │ POST /execute│                │                  │                    │              │           │
+   │─────────────>│                │                  │                    │              │           │
+   │              │                │                  │                    │              │           │
+   │              │  executeSingle │                  │                    │              │           │
+   │              │  /executeBatch │                  │                    │              │           │
+   │              │───────────────>│                  │                    │              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │ getInputDataSet()│                    │              │           │
+   │              │                │─────────────────>│                    │              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │                  │─┐                  │              │           │
+   │              │                │                  │ │ GET(预签名URL)   │              │           │
+   │              │                │                  │<┘                  │              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │                  │ (缓存命中则复用    │              │           │
+   │              │                │                  │  否则解压落盘)     │              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │  inputDataSet    │                    │              │           │
+   │              │                │<─────────────────│                    │              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │     acquireContainer                  │              │           │
+   │              │                │─────────────────────────────────────>│              │           │
+   │              │                │                  │                    │              │           │
+   │              │                │     execute(strategy, code, inputs)  │              │           │
+   │              │                │─────────────────────────────────────────────────────>│           │
+   │              │                │                  │                    │              │           │
+   │              │                │                  │                    │              │ compile   │
+   │              │                │                  │                    │              │──────────>│
+   │              │                │                  │                    │              │           │
+   │              │                │                  │                    │              │ run       │
+   │              │                │                  │                    │              │──────────>│
+   │              │                │                  │                    │              │           │
+   │              │                │                  │                    │              │<──────────│
+   │              │                │                  │                    │              │  result   │
+   │              │                │                  │                    │              │           │
+   │              │                │     releaseContainer                  │              │           │
+   │              │                │─────────────────────────────────────>│              │           │
+   │              │                │                  │                    │              │           │
+   │              │   response     │                  │                    │              │           │
+   │              │<───────────────│                  │                    │              │           │
+   │              │                │                  │                    │              │           │
+   │   Result<>   │                │                  │                    │              │           │
+   │<─────────────│                │                  │                    │              │           │
+   │              │                │                  │                    │              │           │
 ```
 
 ---
@@ -146,90 +146,90 @@
 
 ```
 com.github.ezzziy.codesandbox
-├── CodeSandBoxApplication.java          # 启动类
+├── CodeSandBoxApplication.java          # 启动类（@EnableScheduling）
+│
+├── common/                              # 通用模块
+│   ├── enums/
+│   │   ├── ExecutionStatus.java        # 执行状态枚举（SUCCESS/COMPILE_ERROR/RUNTIME_ERROR/...）
+│   │   └── LanguageEnum.java           # 语言枚举（C/CPP/JAVA8/JAVA17/PYTHON3）
+│   └── result/
+│       └── Result.java                 # 统一响应包装（code/message/data）
 │
 ├── config/                              # 配置层
-│   ├── DockerConfig.java               # Docker 客户端配置
-│   ├── OSSConfig.java                  # OSS 配置
-│   ├── CacheConfig.java                # 缓存配置
-│   └── SecurityConfig.java             # 安全配置
+│   ├── DockerConfig.java               # Docker 客户端配置（@Value 注入）
+│   └── ExecutionConfig.java            # 执行限制配置（@ConfigurationProperties）
 │
 ├── controller/                          # API 层
-│   ├── ExecuteController.java          # 代码执行接口
-│   └── HealthController.java           # 健康检查接口
+│   ├── ExecuteController.java          # 代码执行接口（/execute/*）
+│   └── HealthController.java           # 健康检查接口（/health/*）
 │
 ├── service/                             # 服务层
 │   ├── ExecutionService.java           # 执行服务接口
-│   ├── InputDataService.java           # 输入数据缓存与读取服务
-│   ├── impl/
-│   │   └── ExecutionServiceImpl.java   # 执行服务实现
-│   ├── impl/
-│   │   └── InputDataServiceImpl.java   # 输入数据缓存实现
-│   └── HealthService.java              # 健康服务
+│   ├── InputDataService.java           # 输入数据服务接口
+│   ├── HealthService.java              # 健康服务接口
+│   └── impl/
+│       ├── ExecutionServiceImpl.java   # 执行服务实现
+│       ├── InputDataServiceImpl.java   # 输入数据缓存实现
+│       └── HealthServiceImpl.java      # 健康服务实现
 │
 ├── executor/                            # 执行器层（核心）
-│   ├── CodeExecutor.java               # 执行器接口
-│   ├── DockerCodeExecutor.java         # Docker 执行器实现
-│   ├── ExecutorFactory.java            # 执行器工厂
-│   └── strategy/                       # 语言策略
-│       ├── LanguageStrategy.java       # 语言策略接口
-│       ├── CLanguageStrategy.java      # C 语言策略
-│       ├── CppLanguageStrategy.java    # C++ 语言策略
-│       ├── JavaLanguageStrategy.java   # Java 语言策略
-│       ├── PythonLanguageStrategy.java # Python 语言策略
-│       └── GoLanguageStrategy.java     # Go 语言策略
+│   ├── DockerCodeExecutor.java         # Docker 代码执行器
+│   ├── ContainerManager.java           # 容器管理器（创建/启动/清理）
+│   └── CommandResult.java              # 命令执行结果
 │
-├── docker/                              # Docker 交互层
-│   ├── DockerClientWrapper.java        # Docker 客户端封装
-│   ├── ContainerManager.java           # 容器管理器
-│   └── ResourceLimiter.java            # 资源限制器
+├── pool/                                # 容器池
+│   ├── ContainerPool.java              # 容器池管理（预热/获取/归还/清理）
+│   └── PooledContainer.java            # 池化容器对象
 │
-├── oss/                                 # OSS 层
-│   ├── OSSClient.java                  # OSS 客户端接口
-│   ├── MinIOClient.java                # MinIO 实现
-│   └── AliyunOSSClient.java            # 阿里云 OSS 实现
+├── strategy/                            # 语言策略
+│   ├── LanguageStrategy.java           # 语言策略接口
+│   ├── LanguageStrategyFactory.java    # 策略工厂
+│   ├── CLanguageStrategy.java          # C 语言策略
+│   ├── CppLanguageStrategy.java        # C++ 语言策略
+│   ├── Java8LanguageStrategy.java      # Java 8 策略
+│   ├── Java17LanguageStrategy.java     # Java 17 策略
+│   └── Python3LanguageStrategy.java    # Python 3 策略
 │
 ├── model/                               # 数据模型
-│   ├── request/
-│   │   ├── ExecuteRequest.java         # 执行请求
-│   │   └── CacheRefreshRequest.java    # 缓存刷新请求
-│   ├── response/
-│   │   └── ExecutionResult.java        # 执行结果
-│   ├── enums/
-│   │   ├── LanguageEnum.java           # 语言枚举
-│   │   └── ExecutionStatus.java        # 执行状态枚举
-│   └── dto/
-│       ├── CompileResult.java          # 编译结果
-│       └── RunResult.java              # 运行结果
+│   ├── dto/
+│   │   ├── SingleExecuteRequest.java   # 单次执行请求
+│   │   ├── BatchExecuteRequest.java    # 批量执行请求
+│   │   ├── ExecuteRequest.java         # 通用执行请求（含 input/inputDataUrl）
+│   │   ├── ExecutionResult.java        # 单测试用例执行结果
+│   │   ├── ExecutionTimeStats.java     # 执行时间统计
+│   │   └── InputDataSet.java           # 输入数据集
+│   └── vo/
+│       ├── SingleExecuteResponse.java  # 单次执行响应
+│       ├── BatchExecuteResponse.java   # 批量执行响应
+│       └── ExecuteResponse.java        # 通用执行响应
 │
 ├── exception/                           # 异常处理
-│   ├── SandboxException.java           # 沙箱基础异常
+│   ├── SandboxException.java           # 沙箱基础异常（含 ExecutionStatus + requestId）
 │   ├── CompileException.java           # 编译异常
-│   ├── ExecutionException.java         # 执行异常
-│   ├── TimeoutException.java           # 超时异常
+│   ├── DangerousCodeException.java     # 危险代码异常
+│   ├── RuntimeErrorException.java      # 运行时错误异常
+│   ├── TimeLimitException.java         # 超时异常
 │   ├── MemoryLimitException.java       # 内存超限异常
 │   └── GlobalExceptionHandler.java     # 全局异常处理器
 │
 └── util/                                # 工具类
-    ├── FileUtils.java                  # 文件工具
-    ├── ProcessUtils.java               # 进程工具
-    └── DockerCommandBuilder.java       # Docker 命令构建器
+    └── OssUrlParser.java               # 预签名 URL 解析（提取 ObjectKey）
 ```
 
 ### 3.2 模块职责说明
 
 | 模块 | 职责 | 关键类 |
 |------|------|--------|
-| **config** | 配置管理，Bean 初始化 | `DockerConfig`, `OSSConfig` |
-| **controller** | HTTP 接口，参数校验 | `ExecuteController` |
-| **service** | 业务编排，流程控制 | `ExecutionService` |
-| **executor** | 代码执行核心逻辑 | `DockerCodeExecutor` |
-| **docker** | Docker API 交互封装 | `ContainerManager` |
-| **cache** | 输入数据本地缓存 | `LocalFileCache` |
-| **oss** | 对象存储交互 | `MinIOClient` |
-| **model** | 数据传输对象 | `ExecuteRequest`, `ExecutionResult` |
-| **exception** | 异常定义与处理 | `SandboxException` |
-| **util** | 通用工具方法 | `FileUtils` |
+| **common** | 枚举定义、统一响应 | `ExecutionStatus`, `LanguageEnum`, `Result` |
+| **config** | 配置管理，Bean 初始化 | `DockerConfig`, `ExecutionConfig` |
+| **controller** | HTTP 接口，参数校验 | `ExecuteController`, `HealthController` |
+| **service** | 业务编排，流程控制 | `ExecutionServiceImpl`, `InputDataServiceImpl` |
+| **executor** | Docker 命令执行 | `DockerCodeExecutor`, `ContainerManager` |
+| **pool** | 容器池化复用 | `ContainerPool`, `PooledContainer` |
+| **strategy** | 语言编译/运行策略 | `LanguageStrategy`, `LanguageStrategyFactory` |
+| **model** | 请求/响应/DTO | `SingleExecuteRequest`, `BatchExecuteResponse` |
+| **exception** | 异常定义与处理 | `SandboxException`, `GlobalExceptionHandler` |
+| **util** | 通用工具 | `OssUrlParser` |
 
 ---
 
@@ -238,7 +238,7 @@ com.github.ezzziy.codesandbox
 ### 4.1 Maven 依赖
 
 ```xml
-<!-- Docker Java Client -->
+<!-- Docker Java Client (zerodep transport) -->
 <dependency>
     <groupId>com.github.docker-java</groupId>
     <artifactId>docker-java-core</artifactId>
@@ -246,11 +246,11 @@ com.github.ezzziy.codesandbox
 </dependency>
 <dependency>
     <groupId>com.github.docker-java</groupId>
-    <artifactId>docker-java-transport-httpclient5</artifactId>
+    <artifactId>docker-java-transport-zerodep</artifactId>
     <version>3.3.4</version>
 </dependency>
 
-<!-- Hutool（含 HttpUtil，用于预签名 URL 下载） -->
+<!-- Hutool（含 HttpRequest，用于预签名 URL 下载） -->
 <dependency>
   <groupId>cn.hutool</groupId>
   <artifactId>hutool-all</artifactId>
@@ -279,56 +279,50 @@ com.github.ezzziy.codesandbox
 ### 5.1 application.yml
 
 ```yaml
-server:
-  port: 8090
-
 spring:
   application:
-    name: code-sandbox
+    name: code-sand-box
+
+server:
+  port: 6060
 
 # 沙箱配置
 sandbox:
   # Docker 配置
   docker:
-    host: unix:///var/run/docker.sock  # Linux
-    # host: tcp://localhost:2375       # Windows
-    api-version: "1.41"
-    connection-timeout: 30000
-    read-timeout: 60000
-  
+    host: ${DOCKER_HOST:unix:///var/run/docker.sock}
+    connect-timeout: 30          # 连接超时（秒）
+    response-timeout: 60         # 读取超时（秒）
+    max-connections: 100
+
+  # 容器池配置
+  pool:
+    enabled: true
+    min-size: 1                  # 每种语言最小池大小
+    max-size: 4                  # 每种语言最大池大小
+    max-idle-minutes: 10         # 空闲超时（分钟）
+    max-use-count: 100           # 单容器最大使用次数
+
   # 执行限制
   execution:
-    default-time-limit: 5000      # 默认时间限制 (ms)
-    default-memory-limit: 256     # 默认内存限制 (MB)
-    max-time-limit: 30000         # 最大时间限制 (ms)
-    max-memory-limit: 512         # 最大内存限制 (MB)
-    max-output-size: 65536        # 最大输出大小 (bytes)
-    max-process-count: 10         # 最大进程数
-  
-  # 缓存配置
-  cache:
-    input-data:
-      enabled: true
-      base-path: /var/sandbox/cache/input
-      max-size: 1000              # 最大缓存数量
-      expire-hours: 24            # 过期时间（小时）
-  
-  # OSS 配置
-  oss:
-    type: minio                   # minio / aliyun
-    endpoint: http://localhost:9000
-    access-key: minioadmin
-    secret-key: minioadmin
-    bucket: oj-testcases
-    
-  # 语言镜像配置
-  images:
-    c: "gcc:11-bullseye"
-    cpp: "gcc:11-bullseye"
-    java8: "openjdk:8-jdk-slim"
-    java11: "openjdk:11-jdk-slim"
-    python3: "python:3.10-slim"
-    golang: "golang:1.20-alpine"
+    compile-timeout: 30          # 编译超时（秒）
+    run-timeout: 10              # 运行超时（秒）
+    total-timeout: 300           # 总超时（秒）
+    memory-limit: 256            # 默认内存限制（MB）
+    cpu-limit: 1.0               # CPU 限制
+    output-limit: 65536          # 最大输出（字节 = 64KB）
+    max-processes: 1024          # 最大进程数
+    max-open-files: 256          # 最大打开文件数
+    max-test-cases: 100          # 最大测试用例数
+    work-dir: /var/lib/sandbox-work
+    enable-code-scan: true       # 是否启用危险代码扫描
+    max-concurrent-containers: 50
+
+  # 输入数据缓存
+  input-data:
+    storage-dir: /var/lib/sandbox-inputs
+    download-timeout: 30000      # 下载超时（毫秒）
+    max-file-size: 10485760      # ZIP 最大大小（字节 = 10MB）
 ```
 
 ---
@@ -341,5 +335,6 @@ sandbox:
 2. **[03-DOCKER-EXECUTOR.md](03-DOCKER-EXECUTOR.md)** - Docker 执行器核心实现
 3. **[04-LANGUAGE-SUPPORT.md](04-LANGUAGE-SUPPORT.md)** - 多语言支持配置
 4. **[05-SECURITY.md](05-SECURITY.md)** - 安全机制实现
-5. **[06-CACHE-OSS.md](06-CACHE-OSS.md)** - 缓存与 OSS 集成
+5. **[06-CACHE-OSS.md](06-CACHE-OSS.md)** - 输入数据缓存体系
 6. **[07-CORE-IMPLEMENTATION.md](07-CORE-IMPLEMENTATION.md)** - 核心代码实现
+7. **[08-TASK-ISOLATION.md](08-TASK-ISOLATION.md)** - 任务隔离与文件系统架构

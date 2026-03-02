@@ -2,1021 +2,462 @@
 
 ## 1. 概述
 
-本沙箱支持 6 种编程语言：
-- **C** (GCC 11)
-- **C++** (G++ 11, C++11 标准)
-- **Java** (OpenJDK 8 / 11)
-- **Python** (Python 3.10)
-- **Go** (Go 1.20)
+本沙箱支持 5 种编程语言：
+- **C** (GCC, C11 标准)
+- **C++** (G++, C++11 标准)
+- **Java 8** (OpenJDK 8)
+- **Java 17** (OpenJDK 17)
+- **Python 3**
 
-每种语言通过**策略模式**实现，便于扩展新语言。
+每种语言通过**策略模式**实现，直接实现 `LanguageStrategy` 接口（无抽象基类），通过 Spring 自动注册。
 
 ---
 
-## 2. 语言策略接口
+## 2. 语言枚举
 
-### 2.1 LanguageStrategy 接口
+### 2.1 LanguageEnum
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
+package com.github.ezzziy.codesandbox.common.enums;
 
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
+@Getter
+@AllArgsConstructor
+public enum LanguageEnum {
 
-/**
- * 语言执行策略接口
- */
+    C("c", "C", "gcc:11", ".c"),
+    CPP("cpp11", "C++11", "gcc:11", ".cpp"),
+    JAVA8("java8", "Java 8", "eclipse-temurin:8-jdk-alpine", ".java"),
+    JAVA17("java17", "Java 17", "eclipse-temurin:17-jdk-alpine", ".java"),
+    PYTHON3("python3", "Python 3", "python:3.10", ".py");
+
+    private final String code;           // 语言标识符（API 传参用）
+    private final String displayName;    // 显示名称
+    private final String dockerImage;    // 枚举中原始镜像名（策略类会覆盖为 sandbox-* 镜像）
+    private final String extension;      // 源文件扩展名
+
+    public static LanguageEnum fromCode(String code);
+    public boolean isJava();
+}
+```
+
+> 注意：枚举中的 `dockerImage` 字段是基准镜像名，实际运行时使用各策略类 `getDockerImage()` 返回的自定义沙箱镜像（`sandbox-gcc:latest` 等）。
+
+---
+
+## 3. 语言策略接口
+
+### 3.1 LanguageStrategy 接口
+
+```java
+package com.github.ezzziy.codesandbox.strategy;
+
 public interface LanguageStrategy {
 
-    /**
-     * 获取语言标识
-     */
-    String getLanguageId();
+    /** 获取支持的语言枚举 */
+    LanguageEnum getLanguage();
 
-    /**
-     * 获取语言显示名称
-     */
-    String getLanguageName();
-
-    /**
-     * 获取语言版本
-     */
-    String getVersion();
-
-    /**
-     * 获取 Docker 镜像
-     */
+    /** 获取实际使用的 Docker 镜像名称 */
     String getDockerImage();
 
-    /**
-     * 获取源代码文件名
-     */
+    /** 获取源文件名 */
     String getSourceFileName();
 
-    /**
-     * 获取文件扩展名
-     */
-    String getFileExtension();
+    /** 获取编译命令（解释型语言返回 null） */
+    String[] getCompileCommand(String sourceFile, String outputFile);
 
-    /**
-     * 是否需要编译
-     */
-    boolean needsCompilation();
+    /** 获取运行命令 */
+    String[] getRunCommand(String executableFile);
 
-    /**
-     * 获取编译命令
-     * @param context 执行上下文
-     * @return 编译命令数组
-     */
-    String[] getCompileCommand(ExecutionContext context);
+    /** 获取可执行文件名（Java 返回 "."，Python 返回 "main.py"，C/C++ 返回 "main"） */
+    String getExecutableFileName();
 
-    /**
-     * 获取运行命令
-     * @param context 执行上下文
-     * @return 运行命令数组
-     */
-    String[] getRunCommand(ExecutionContext context);
-
-    /**
-     * 获取额外的环境变量
-     */
-    default java.util.Map<String, String> getEnvironmentVariables() {
-        return java.util.Collections.emptyMap();
+    /** 是否需要编译（默认通过 getCompileCommand 是否返回 null 判断） */
+    default boolean needCompile() {
+        return getCompileCommand("", "") != null;
     }
 
-    /**
-     * 获取额外的 JVM 参数（仅 Java）
-     */
-    default String[] getJvmArgs(ExecutionContext context) {
-        return new String[0];
-    }
+    /** 获取危险代码正则模式列表 */
+    List<Pattern> getDangerousPatterns();
 
-    /**
-     * 获取推荐的进程数限制
-     */
-    default int getRecommendedPidsLimit() {
-        return 10;
-    }
-
-    /**
-     * 获取编译超时时间（毫秒）
-     */
-    default long getCompileTimeout() {
-        return 30000;
-    }
-}
-```
-
-### 2.2 抽象基类
-
-```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import lombok.Getter;
-
-/**
- * 语言策略抽象基类
- */
-@Getter
-public abstract class AbstractLanguageStrategy implements LanguageStrategy {
-
-    protected final String languageId;
-    protected final String languageName;
-    protected final String version;
-    protected final String dockerImage;
-    protected final String sourceFileName;
-    protected final String fileExtension;
-    protected final boolean needsCompilation;
-
-    protected AbstractLanguageStrategy(String languageId, String languageName, String version,
-                                       String dockerImage, String sourceFileName, 
-                                       String fileExtension, boolean needsCompilation) {
-        this.languageId = languageId;
-        this.languageName = languageName;
-        this.version = version;
-        this.dockerImage = dockerImage;
-        this.sourceFileName = sourceFileName;
-        this.fileExtension = fileExtension;
-        this.needsCompilation = needsCompilation;
-    }
-
-    @Override
-    public boolean needsCompilation() {
-        return needsCompilation;
-    }
-}
-```
-
----
-
-## 3. 语言策略实现
-
-### 3.1 C 语言策略
-
-```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-/**
- * C 语言执行策略
- */
-@Component
-public class CLanguageStrategy extends AbstractLanguageStrategy {
-
-    public CLanguageStrategy() {
-        super(
-            "c",                    // languageId
-            "C",                    // languageName
-            "GCC 11",               // version
-            "gcc:11-bullseye",      // dockerImage
-            "main.c",               // sourceFileName
-            ".c",                   // fileExtension
-            true                    // needsCompilation
-        );
-    }
-
-    @Override
-    public String[] getCompileCommand(ExecutionContext context) {
-        return new String[]{
-            "/bin/sh", "-c",
-            "gcc -O2 -std=c11 -Wall -o main main.c -lm 2>&1"
-        };
-    }
-
-    @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        return new String[]{"./main"};
-    }
-
-    @Override
-    public int getRecommendedPidsLimit() {
-        return 5;  // C 程序通常单进程
-    }
-}
-```
-
-### 3.2 C++ 语言策略
-
-```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-/**
- * C++ 语言执行策略
- */
-@Component
-public class CppLanguageStrategy extends AbstractLanguageStrategy {
-
-    public CppLanguageStrategy() {
-        super(
-            "cpp",                  // languageId
-            "C++",                  // languageName
-            "G++ 11 (C++11)",       // version
-            "gcc:11-bullseye",      // dockerImage
-            "main.cpp",             // sourceFileName
-            ".cpp",                 // fileExtension
-            true                    // needsCompilation
-        );
-    }
-
-    @Override
-    public String[] getCompileCommand(ExecutionContext context) {
-        // 可根据 context 中的 languageVersion 选择 C++ 标准
-        String cppStandard = getCppStandard(context.getLanguageVersion());
-        
-        return new String[]{
-            "/bin/sh", "-c",
-            String.format("g++ -O2 -std=%s -Wall -o main main.cpp 2>&1", cppStandard)
-        };
-    }
-
-    @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        return new String[]{"./main"};
-    }
-
-    @Override
-    public int getRecommendedPidsLimit() {
-        return 5;
-    }
-
-    /**
-     * 获取 C++ 标准版本
-     */
-    private String getCppStandard(String languageVersion) {
-        if (languageVersion == null) {
-            return "c++11";
+    /** 检查代码是否包含危险模式，返回匹配到的正则（null 表示安全） */
+    default String checkDangerousCode(String code) {
+        for (Pattern pattern : getDangerousPatterns()) {
+            if (pattern.matcher(code).find()) {
+                return pattern.pattern();
+            }
         }
-        return switch (languageVersion.toLowerCase()) {
-            case "14", "c++14" -> "c++14";
-            case "17", "c++17" -> "c++17";
-            case "20", "c++20" -> "c++20";
-            default -> "c++11";
-        };
+        return null;
     }
+
+    /** 编译超时时间（秒），默认 30 秒 */
+    default int getCompileTimeout() { return 30; }
+
+    /** 额外环境变量，默认空 */
+    default String[] getEnvironmentVariables() { return new String[0]; }
 }
 ```
 
-### 3.3 Java 8 策略
+关键设计点：
+- **无抽象基类**：每个策略直接实现接口
+- **危险代码扫描集成在策略中**：每种语言定义自己的 `getDangerousPatterns()`，无独立的 `DangerousCodeScanner` 组件
+- **编译判断**：通过 `getCompileCommand()` 返回值是否为 null 自动判断
+
+---
+
+## 4. 语言策略实现
+
+### 4.1 C 语言策略
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-import java.util.Map;
-
-/**
- * Java 8 执行策略
- */
 @Component
-public class Java8LanguageStrategy extends AbstractLanguageStrategy {
-
-    public Java8LanguageStrategy() {
-        super(
-            "java8",                    // languageId
-            "Java",                     // languageName
-            "OpenJDK 8",                // version
-            "openjdk:8-jdk-slim",       // dockerImage
-            "Main.java",                // sourceFileName
-            ".java",                    // fileExtension
-            true                        // needsCompilation
-        );
-    }
+public class CLanguageStrategy implements LanguageStrategy {
 
     @Override
-    public String[] getCompileCommand(ExecutionContext context) {
+    public LanguageEnum getLanguage() { return LanguageEnum.C; }
+
+    @Override
+    public String getDockerImage() { return "sandbox-gcc:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "main.c"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
         return new String[]{
-            "/bin/sh", "-c",
-            "javac -encoding UTF-8 -J-Xmx256m Main.java 2>&1"
+            "gcc", "-std=c11", "-O2", "-Wall", "-Wextra",
+            "-fno-asm", "-lm", "-o", outputFile, sourceFile
         };
     }
 
     @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        int memoryLimit = context.getMemoryLimit();
-        return new String[]{
-            "java",
-            "-Xmx" + memoryLimit + "m",
-            "-Xms16m",
-            "-XX:+UseSerialGC",
-            "-Djava.security.manager",
-            "-Djava.security.policy=/dev/null",
-            "Main"
-        };
+    public String[] getRunCommand(String executableFile) {
+        return new String[]{executableFile};
     }
 
     @Override
-    public String[] getJvmArgs(ExecutionContext context) {
-        int memoryLimit = context.getMemoryLimit();
-        return new String[]{
-            "-Xmx" + memoryLimit + "m",
-            "-Xms16m",
-            "-XX:+UseSerialGC",
-            "-Djava.awt.headless=true"
-        };
-    }
+    public String getExecutableFileName() { return "main"; }
 
-    @Override
-    public Map<String, String> getEnvironmentVariables() {
-        return Map.of(
-            "JAVA_TOOL_OPTIONS", "-Dfile.encoding=UTF-8"
-        );
-    }
-
-    @Override
-    public int getRecommendedPidsLimit() {
-        return 50;  // Java 需要更多线程（GC、JIT 等）
-    }
-
-    @Override
-    public long getCompileTimeout() {
-        return 60000;  // Java 编译较慢，60 秒
-    }
+    // 危险模式：system(), exec*(), fork(), socket(), 内联汇编, 危险头文件等
 }
 ```
 
-### 3.4 Java 11 策略
+### 4.2 C++ 语言策略
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-import java.util.Map;
-
-/**
- * Java 11 执行策略
- */
 @Component
-public class Java11LanguageStrategy extends AbstractLanguageStrategy {
-
-    public Java11LanguageStrategy() {
-        super(
-            "java11",                   // languageId
-            "Java",                     // languageName
-            "OpenJDK 11",               // version
-            "openjdk:11-jdk-slim",      // dockerImage
-            "Main.java",                // sourceFileName
-            ".java",                    // fileExtension
-            true                        // needsCompilation
-        );
-    }
+public class CppLanguageStrategy implements LanguageStrategy {
 
     @Override
-    public String[] getCompileCommand(ExecutionContext context) {
+    public LanguageEnum getLanguage() { return LanguageEnum.CPP; }
+
+    @Override
+    public String getDockerImage() { return "sandbox-gcc:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "main.cpp"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
         return new String[]{
-            "/bin/sh", "-c",
-            "javac -encoding UTF-8 -J-Xmx256m Main.java 2>&1"
+            "g++", "-std=c++11", "-O2", "-Wall", "-Wextra",
+            "-fno-asm", "-o", outputFile, sourceFile
         };
     }
 
     @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        int memoryLimit = context.getMemoryLimit();
-        return new String[]{
-            "java",
-            "-Xmx" + memoryLimit + "m",
-            "-Xms16m",
-            "-XX:+UseSerialGC",
-            "-XX:+DisableAttachMechanism",
-            "--illegal-access=deny",
-            "Main"
-        };
+    public String[] getRunCommand(String executableFile) {
+        return new String[]{executableFile};
     }
 
     @Override
-    public Map<String, String> getEnvironmentVariables() {
-        return Map.of(
-            "JAVA_TOOL_OPTIONS", "-Dfile.encoding=UTF-8"
-        );
-    }
+    public String getExecutableFileName() { return "main"; }
 
-    @Override
-    public int getRecommendedPidsLimit() {
-        return 50;
-    }
-
-    @Override
-    public long getCompileTimeout() {
-        return 60000;
-    }
+    // 危险模式：与 C 类似，额外包含 std::thread, std::async, std::filesystem 等
 }
 ```
 
-### 3.5 Python 3 策略
+### 4.3 Java 8 策略
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-import java.util.Map;
-
-/**
- * Python 3 执行策略
- */
 @Component
-public class Python3LanguageStrategy extends AbstractLanguageStrategy {
+public class Java8LanguageStrategy implements LanguageStrategy {
 
-    public Python3LanguageStrategy() {
-        super(
-            "python3",              // languageId
-            "Python",               // languageName
-            "Python 3.10",          // version
-            "python:3.10-slim",     // dockerImage
-            "main.py",              // sourceFileName
-            ".py",                  // fileExtension
-            false                   // needsCompilation（解释型语言）
-        );
+    @Override
+    public LanguageEnum getLanguage() { return LanguageEnum.JAVA8; }
+
+    @Override
+    public String getDockerImage() { return "sandbox-java8:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "Main.java"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
+        return new String[]{"javac", "-encoding", "UTF-8", "-d", outputFile, sourceFile};
     }
 
     @Override
-    public String[] getCompileCommand(ExecutionContext context) {
-        // Python 是解释型语言，但可以进行语法检查
+    public String[] getRunCommand(String executableFile) {
         return new String[]{
-            "/bin/sh", "-c",
-            "python3 -m py_compile main.py 2>&1"
+            "java", "-Xmx256m", "-Xms64m",
+            "-Djava.security.manager=default",
+            "-cp", executableFile, "Main"
         };
     }
 
     @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        return new String[]{
-            "python3", "-u", "main.py"  // -u 禁用输出缓冲
-        };
-    }
+    public String getExecutableFileName() { return "."; }  // 当前目录作为 classpath
 
     @Override
-    public Map<String, String> getEnvironmentVariables() {
-        return Map.of(
-            "PYTHONIOENCODING", "utf-8",
-            "PYTHONDONTWRITEBYTECODE", "1",
-            "PYTHONUNBUFFERED", "1"
-        );
-    }
+    public int getCompileTimeout() { return 60; }  // Java 编译较慢
 
-    @Override
-    public int getRecommendedPidsLimit() {
-        return 10;
-    }
+    // 危险模式：Runtime.exec, ProcessBuilder, 反射, 文件操作, 网络, ClassLoader, JNI, Unsafe 等
 }
 ```
 
-### 3.6 Go 语言策略
+### 4.4 Java 17 策略
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import org.springframework.stereotype.Component;
-
-import java.util.Map;
-
-/**
- * Go 语言执行策略
- */
 @Component
-public class GoLanguageStrategy extends AbstractLanguageStrategy {
+public class Java17LanguageStrategy implements LanguageStrategy {
 
-    public GoLanguageStrategy() {
-        super(
-            "golang",               // languageId
-            "Go",                   // languageName
-            "Go 1.20",              // version
-            "golang:1.20-alpine",   // dockerImage
-            "main.go",              // sourceFileName
-            ".go",                  // fileExtension
-            true                    // needsCompilation
-        );
+    @Override
+    public LanguageEnum getLanguage() { return LanguageEnum.JAVA17; }
+
+    @Override
+    public String getDockerImage() { return "sandbox-java17:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "Main.java"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
+        return new String[]{"javac", "-encoding", "UTF-8", "-d", outputFile, sourceFile};
     }
 
     @Override
-    public String[] getCompileCommand(ExecutionContext context) {
+    public String[] getRunCommand(String executableFile) {
         return new String[]{
-            "/bin/sh", "-c",
-            "go build -o main main.go 2>&1"
+            "java", "-Xmx256m", "-Xms64m",
+            "-XX:+UseG1GC",           // Java 17 使用 G1GC
+            "-cp", executableFile, "Main"
         };
     }
 
     @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        return new String[]{"./main"};
+    public String getExecutableFileName() { return "."; }
+
+    @Override
+    public int getCompileTimeout() { return 60; }
+
+    // 危险模式：与 Java 8 相同
+}
+```
+
+> 与 Java 8 的区别：Java 17 使用 `-XX:+UseG1GC`，不设置 `-Djava.security.manager`（Java 17 中 SecurityManager 已弃用）。
+
+### 4.5 Python 3 策略
+
+```java
+@Component
+public class Python3LanguageStrategy implements LanguageStrategy {
+
+    @Override
+    public LanguageEnum getLanguage() { return LanguageEnum.PYTHON3; }
+
+    @Override
+    public String getDockerImage() { return "sandbox-python:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "main.py"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
+        return null;  // 解释型语言，不编译
     }
 
     @Override
-    public Map<String, String> getEnvironmentVariables() {
-        return Map.of(
-            "GOOS", "linux",
-            "GOARCH", "amd64",
-            "CGO_ENABLED", "0"  // 禁用 CGO，纯静态编译
-        );
+    public String[] getRunCommand(String executableFile) {
+        return new String[]{"python3", "-u", executableFile};  // -u 禁用输出缓冲
     }
 
     @Override
-    public int getRecommendedPidsLimit() {
-        return 20;  // Go 有 goroutine，可能需要更多
-    }
+    public String getExecutableFileName() { return "main.py"; }
 
     @Override
-    public long getCompileTimeout() {
-        return 60000;  // Go 编译可能较慢
+    public boolean needCompile() { return false; }
+
+    @Override
+    public String[] getEnvironmentVariables() {
+        return new String[]{
+            "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONUNBUFFERED=1"
+        };
     }
+
+    // 危险模式：os.system, subprocess, eval, exec, socket, ctypes, multiprocessing, pickle 等
 }
 ```
 
 ---
 
-## 4. 语言策略工厂
+## 5. 各语言危险代码模式概览
 
-### 4.1 LanguageStrategyFactory
+| 语言 | 主要拦截类别 | 典型模式 |
+|------|------------|---------|
+| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件 | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>` |
+| C++ | 同 C + C++ 特有 | `std::thread`, `std::async`, `std::filesystem` |
+| Java 8 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe | `Runtime.getRuntime()`, `Class.forName()`, `System.exit` |
+| Java 17 | 同 Java 8 | 相同危险模式列表 |
+| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle | `os.system()`, `subprocess`, `eval()`, `socket` |
+
+> 扫描在 `DockerCodeExecutor` 中调用 `strategy.checkDangerousCode(code)`，仅在 `executionConfig.isEnableCodeScan()` 为 true 时执行。
+
+---
+
+## 6. 语言策略工厂
+
+### 6.1 LanguageStrategyFactory
 
 ```java
-package com.github.ezzziy.codesandbox.executor.strategy;
-
-import com.github.ezzziy.codesandbox.exception.UnsupportedLanguageException;
-import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
-/**
- * 语言策略工厂
- */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class LanguageStrategyFactory {
 
     private final List<LanguageStrategy> strategies;
-    private final Map<String, LanguageStrategy> strategyMap = new HashMap<>();
+    private final Map<LanguageEnum, LanguageStrategy> strategyMap = new EnumMap<>(LanguageEnum.class);
 
     @PostConstruct
     public void init() {
         for (LanguageStrategy strategy : strategies) {
-            strategyMap.put(strategy.getLanguageId().toLowerCase(), strategy);
-            log.info("注册语言策略: {} ({})", strategy.getLanguageId(), strategy.getVersion());
+            strategyMap.put(strategy.getLanguage(), strategy);
+            log.info("注册语言策略: {} -> {}",
+                    strategy.getLanguage().getCode(),
+                    strategy.getClass().getSimpleName());
         }
-        log.info("共加载 {} 个语言策略", strategyMap.size());
+        log.info("共注册 {} 种语言策略", strategyMap.size());
     }
 
-    /**
-     * 获取语言策略
-     * @param language 语言标识
-     * @param version 语言版本（可选）
-     * @return 语言策略
-     */
-    public LanguageStrategy getStrategy(String language, String version) {
-        String key = resolveLanguageKey(language, version);
-        
-        LanguageStrategy strategy = strategyMap.get(key.toLowerCase());
-        if (strategy == null) {
-            throw new UnsupportedLanguageException(
-                    "不支持的编程语言: " + language + (version != null ? " " + version : ""),
-                    getSupportedLanguages()
-            );
-        }
-        
-        return strategy;
-    }
+    /** 根据语言枚举获取策略 */
+    public LanguageStrategy getStrategy(LanguageEnum language);
 
-    /**
-     * 获取所有支持的语言
-     */
-    public List<LanguageStrategy> getAllStrategies() {
-        return List.copyOf(strategies);
-    }
+    /** 根据语言代码字符串获取策略（内部通过 LanguageEnum.fromCode 转换） */
+    public LanguageStrategy getStrategy(String languageCode);
 
-    /**
-     * 获取支持的语言 ID 列表
-     */
-    public List<String> getSupportedLanguages() {
-        return strategies.stream()
-                .map(LanguageStrategy::getLanguageId)
-                .toList();
-    }
+    /** 判断是否支持指定语言 */
+    public boolean isSupported(String languageCode);
 
-    /**
-     * 检查语言是否支持
-     */
-    public boolean isSupported(String language) {
-        return strategyMap.containsKey(language.toLowerCase());
-    }
-
-    /**
-     * 解析语言 Key
-     */
-    private String resolveLanguageKey(String language, String version) {
-        language = language.toLowerCase().trim();
-        
-        // Java 需要根据版本选择
-        if ("java".equals(language)) {
-            if (version == null || version.isEmpty()) {
-                return "java11";  // 默认 Java 11
-            }
-            return switch (version) {
-                case "8", "1.8" -> "java8";
-                case "11", "17", "21" -> "java11";  // 11+ 共用策略
-                default -> "java11";
-            };
-        }
-        
-        // C++ 别名处理
-        if ("c++".equals(language) || "cplusplus".equals(language)) {
-            return "cpp";
-        }
-        
-        // Python 别名处理
-        if ("python".equals(language) || "py".equals(language)) {
-            return "python3";
-        }
-        
-        // Go 别名处理
-        if ("go".equals(language)) {
-            return "golang";
-        }
-        
-        return language;
-    }
+    /** 获取所有支持的语言枚举列表 */
+    public List<LanguageEnum> getSupportedLanguages();
 }
 ```
+
+关键设计：
+- 使用 `EnumMap<LanguageEnum, LanguageStrategy>`，类型安全且高效
+- 语言查找通过 `LanguageEnum.fromCode()` 实现，不支持的语言抛出 `IllegalArgumentException`
+- 所有策略通过 Spring `List<LanguageStrategy>` 自动注入，`@PostConstruct` 时注册到 Map
 
 ---
 
-## 5. 语言服务
+## 7. Docker 沙箱镜像
 
-### 5.1 LanguageService
+项目使用自定义构建的沙箱镜像（非公共镜像），位于 `sandbox-images/` 目录：
 
-```java
-package com.github.ezzziy.codesandbox.service;
+| 镜像名 | 适用语言 | 构建文件 |
+|-------|---------|---------|
+| `sandbox-gcc:latest` | C, C++ | `sandbox-images/gcc/Dockerfile` |
+| `sandbox-java8:latest` | Java 8 | `sandbox-images/java/Dockerfile.java8` |
+| `sandbox-java17:latest` | Java 17 | `sandbox-images/java/Dockerfile.java17` |
+| `sandbox-python:latest` | Python 3 | `sandbox-images/python/Dockerfile` |
 
-import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategy;
-import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategyFactory;
-import com.github.ezzziy.codesandbox.model.response.LanguageInfo;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
+所有沙箱镜像基于 `sandbox-base:latest` 基础镜像构建，内含 `sandbox` 用户 (uid=1000)、`/sandbox/workspace` 工作目录以及 `/usr/bin/time` 工具。
 
-import java.util.List;
-
-@Service
-@RequiredArgsConstructor
-public class LanguageService {
-
-    private final LanguageStrategyFactory strategyFactory;
-    private final DockerImageChecker imageChecker;
-
-    /**
-     * 获取所有支持的语言信息
-     */
-    public List<LanguageInfo> getSupportedLanguages() {
-        return strategyFactory.getAllStrategies().stream()
-                .map(this::toLanguageInfo)
-                .toList();
-    }
-
-    /**
-     * 检查语言是否可用
-     */
-    public boolean isLanguageAvailable(String languageId) {
-        if (!strategyFactory.isSupported(languageId)) {
-            return false;
-        }
-        
-        LanguageStrategy strategy = strategyFactory.getStrategy(languageId, null);
-        return imageChecker.isImageAvailable(strategy.getDockerImage());
-    }
-
-    private LanguageInfo toLanguageInfo(LanguageStrategy strategy) {
-        return LanguageInfo.builder()
-                .id(strategy.getLanguageId())
-                .name(strategy.getLanguageName())
-                .version(strategy.getVersion())
-                .extension(strategy.getFileExtension())
-                .compilable(strategy.needsCompilation())
-                .image(strategy.getDockerImage())
-                .available(imageChecker.isImageAvailable(strategy.getDockerImage()))
-                .build();
-    }
-}
-```
-
-### 5.2 LanguageInfo 响应模型
-
-```java
-package com.github.ezzziy.codesandbox.model.response;
-
-import lombok.Builder;
-import lombok.Data;
-
-@Data
-@Builder
-public class LanguageInfo {
-    
-    /**
-     * 语言 ID
-     */
-    private String id;
-    
-    /**
-     * 语言名称
-     */
-    private String name;
-    
-    /**
-     * 版本信息
-     */
-    private String version;
-    
-    /**
-     * 文件扩展名
-     */
-    private String extension;
-    
-    /**
-     * 是否需要编译
-     */
-    private Boolean compilable;
-    
-    /**
-     * Docker 镜像
-     */
-    private String image;
-    
-    /**
-     * 是否可用（镜像是否存在）
-     */
-    private Boolean available;
-}
-```
-
----
-
-## 6. Docker 镜像管理
-
-### 6.1 镜像检查器
-
-```java
-package com.github.ezzziy.codesandbox.docker;
-
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.model.Image;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cache.annotation.Cacheable;
-import org.springframework.stereotype.Component;
-
-import java.util.List;
-
-@Slf4j
-@Component
-@RequiredArgsConstructor
-public class DockerImageChecker {
-
-    private final DockerClient dockerClient;
-
-    /**
-     * 检查镜像是否存在
-     */
-    @Cacheable(value = "imageExists", key = "#imageName")
-    public boolean isImageAvailable(String imageName) {
-        try {
-            List<Image> images = dockerClient.listImagesCmd()
-                    .withImageNameFilter(imageName)
-                    .exec();
-            return !images.isEmpty();
-        } catch (Exception e) {
-            log.warn("检查镜像失败: {}", imageName, e);
-            return false;
-        }
-    }
-
-    /**
-     * 拉取镜像
-     */
-    public void pullImage(String imageName) {
-        try {
-            log.info("开始拉取镜像: {}", imageName);
-            dockerClient.pullImageCmd(imageName)
-                    .start()
-                    .awaitCompletion();
-            log.info("镜像拉取完成: {}", imageName);
-        } catch (Exception e) {
-            log.error("拉取镜像失败: {}", imageName, e);
-            throw new RuntimeException("拉取镜像失败: " + imageName, e);
-        }
-    }
-
-    /**
-     * 确保镜像存在（不存在则拉取）
-     */
-    public void ensureImageExists(String imageName) {
-        if (!isImageAvailable(imageName)) {
-            pullImage(imageName);
-        }
-    }
-}
-```
-
-### 6.2 镜像预热脚本
-
+构建命令：
 ```bash
-#!/bin/bash
-# scripts/pull-images.sh
-# 预拉取所有需要的 Docker 镜像
-
-IMAGES=(
-    "gcc:11-bullseye"
-    "openjdk:8-jdk-slim"
-    "openjdk:11-jdk-slim"
-    "python:3.10-slim"
-    "golang:1.20-alpine"
-)
-
-echo "开始拉取 OJ 沙箱镜像..."
-
-for image in "${IMAGES[@]}"; do
-    echo "拉取: $image"
-    docker pull "$image"
-    if [ $? -eq 0 ]; then
-        echo "✓ $image 拉取成功"
-    else
-        echo "✗ $image 拉取失败"
-    fi
-done
-
-echo "镜像拉取完成！"
-docker images | grep -E "gcc|openjdk|python|golang"
+cd sandbox-images && bash build.sh
 ```
 
 ---
 
-## 7. 语言配置文件
+## 8. 各语言配置对比
 
-### 7.1 languages.yml
-
-```yaml
-# 语言配置（可选，用于动态配置）
-sandbox:
-  languages:
-    c:
-      enabled: true
-      image: "gcc:11-bullseye"
-      source-file: "main.c"
-      compile-command: "gcc -O2 -std=c11 -Wall -o main main.c -lm"
-      run-command: "./main"
-      compile-timeout: 30000
-      pids-limit: 5
-      
-    cpp:
-      enabled: true
-      image: "gcc:11-bullseye"
-      source-file: "main.cpp"
-      compile-command: "g++ -O2 -std=c++11 -Wall -o main main.cpp"
-      run-command: "./main"
-      compile-timeout: 30000
-      pids-limit: 5
-      
-    java8:
-      enabled: true
-      image: "openjdk:8-jdk-slim"
-      source-file: "Main.java"
-      compile-command: "javac -encoding UTF-8 Main.java"
-      run-command: "java -Xmx{memoryLimit}m Main"
-      compile-timeout: 60000
-      pids-limit: 50
-      
-    java11:
-      enabled: true
-      image: "openjdk:11-jdk-slim"
-      source-file: "Main.java"
-      compile-command: "javac -encoding UTF-8 Main.java"
-      run-command: "java -Xmx{memoryLimit}m Main"
-      compile-timeout: 60000
-      pids-limit: 50
-      
-    python3:
-      enabled: true
-      image: "python:3.10-slim"
-      source-file: "main.py"
-      compile-command: "python3 -m py_compile main.py"  # 语法检查
-      run-command: "python3 -u main.py"
-      compile-timeout: 10000
-      pids-limit: 10
-      
-    golang:
-      enabled: true
-      image: "golang:1.20-alpine"
-      source-file: "main.go"
-      compile-command: "go build -o main main.go"
-      run-command: "./main"
-      compile-timeout: 60000
-      pids-limit: 20
-```
-
----
-
-## 8. 语言特定限制
-
-### 8.1 各语言安全配置对比
-
-| 语言 | 进程限制 | 特殊安全措施 | 编译超时 | 备注 |
-|------|---------|-------------|---------|------|
-| C | 5 | 禁用 execve | 30s | 纯静态 |
-| C++ | 5 | 禁用 execve | 30s | 纯静态 |
-| Java 8 | 50 | Security Manager | 60s | 禁用反射 |
-| Java 11 | 50 | --illegal-access=deny | 60s | 模块安全 |
-| Python | 10 | 禁用 os.system | 10s | 解释执行 |
-| Go | 20 | 禁用 CGO | 60s | goroutine |
-
-### 8.2 Java 安全策略文件
-
-```
-// java.policy - Java 安全策略
-grant {
-    // 基本权限
-    permission java.io.FilePermission "/workspace/-", "read,write";
-    permission java.util.PropertyPermission "*", "read";
-    
-    // 禁止的权限（不授予）
-    // permission java.lang.RuntimePermission "exitVM.*";
-    // permission java.lang.RuntimePermission "createClassLoader";
-    // permission java.lang.RuntimePermission "setSecurityManager";
-    // permission java.io.FilePermission "<<ALL FILES>>", "execute";
-    // permission java.net.SocketPermission "*", "connect,resolve";
-};
-```
+| 属性 | C | C++ | Java 8 | Java 17 | Python 3 |
+|------|---|-----|--------|---------|----------|
+| 语言代码 | `c` | `cpp11` | `java8` | `java17` | `python3` |
+| Docker 镜像 | sandbox-gcc | sandbox-gcc | sandbox-java8 | sandbox-java17 | sandbox-python |
+| 源文件名 | main.c | main.cpp | Main.java | Main.java | main.py |
+| 可执行文件 | main | main | . (classpath) | . (classpath) | main.py |
+| 需要编译 | 是 | 是 | 是 | 是 | 否 |
+| 编译超时 | 30s | 30s | 60s | 60s | N/A |
+| 编译器 | gcc | g++ | javac | javac | N/A |
+| 编译标准 | C11 | C++11 | UTF-8 | UTF-8 | N/A |
+| 优化选项 | -O2 -Wall -Wextra -fno-asm | -O2 -Wall -Wextra -fno-asm | N/A | N/A | N/A |
+| 运行参数 | 直接执行 | 直接执行 | -Xmx256m -Djava.security.manager=default | -Xmx256m -XX:+UseG1GC | -u (无缓冲) |
 
 ---
 
 ## 9. 扩展新语言
 
-### 9.1 添加新语言步骤
+添加新语言只需三步：
 
-1. **创建策略类**
+### 步骤 1：新增 LanguageEnum 枚举值
+
+```java
+RUST("rust", "Rust", "rust:1.70", ".rs"),
+```
+
+### 步骤 2：创建策略类
 
 ```java
 @Component
-public class RustLanguageStrategy extends AbstractLanguageStrategy {
-    
-    public RustLanguageStrategy() {
-        super("rust", "Rust", "1.70", "rust:1.70-slim", 
-              "main.rs", ".rs", true);
-    }
-    
+public class RustLanguageStrategy implements LanguageStrategy {
+
     @Override
-    public String[] getCompileCommand(ExecutionContext context) {
-        return new String[]{"/bin/sh", "-c", 
-            "rustc -O -o main main.rs 2>&1"};
-    }
-    
+    public LanguageEnum getLanguage() { return LanguageEnum.RUST; }
+
     @Override
-    public String[] getRunCommand(ExecutionContext context) {
-        return new String[]{"./main"};
+    public String getDockerImage() { return "sandbox-rust:latest"; }
+
+    @Override
+    public String getSourceFileName() { return "main.rs"; }
+
+    @Override
+    public String[] getCompileCommand(String sourceFile, String outputFile) {
+        return new String[]{"rustc", "-O", "-o", outputFile, sourceFile};
+    }
+
+    @Override
+    public String[] getRunCommand(String executableFile) {
+        return new String[]{executableFile};
+    }
+
+    @Override
+    public String getExecutableFileName() { return "main"; }
+
+    @Override
+    public List<Pattern> getDangerousPatterns() {
+        return List.of(
+            Pattern.compile("\\bstd::process::Command\\b"),
+            Pattern.compile("\\bstd::net::")
+        );
     }
 }
 ```
 
-2. **添加 Docker 镜像**
+### 步骤 3：构建沙箱镜像
 
-```bash
-docker pull rust:1.70-slim
-```
+在 `sandbox-images/` 下新增 Dockerfile 并运行构建脚本。
 
-3. **更新配置文件**（如使用动态配置）
-
-4. **测试**
-
-```bash
-curl -X POST http://localhost:8090/api/v1/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "language": "rust",
-    "code": "fn main() { println!(\"Hello, World!\"); }",
-    "inputDataKey": "test/empty.in",
-    "timeLimit": 5000,
-    "memoryLimit": 256
-  }'
-```
+> 无需修改工厂类或任何配置文件——Spring 自动扫描注册新策略。
 
 ---
 
 ## 10. 下一步
 
 下一篇文档将详细介绍 **安全机制实现**，包括：
-- Docker 隔离配置
-- 系统调用限制
-- 危险代码检测
+- 容器安全配置（capDrop、no-new-privileges、tmpFs）
+- 危险代码检测策略
 - 资源限制实现
 
 详见 [05-SECURITY.md](05-SECURITY.md)

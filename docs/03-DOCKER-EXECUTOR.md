@@ -3,11 +3,11 @@
 ## 1. 概述
 
 Docker 执行器是代码沙箱的核心组件，负责：
-- 创建隔离的 Docker 容器
+- 通过容器池管理预热的 Docker 容器
 - 在容器中编译和执行用户代码
-- 采集执行结果（时间、内存、输出）
-- 确保容器资源限制和安全隔离
-- 清理临时资源
+- 使用 shell 脚本采集精确执行时间和内存用量
+- 危险代码扫描（集成在语言策略中）
+- 清理任务目录，容器复用
 
 ---
 
@@ -16,126 +16,74 @@ Docker 执行器是代码沙箱的核心组件，负责：
 ### 2.1 DockerConfig
 
 ```java
-package com.github.ezzziy.codesandbox.config;
-
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.core.DockerClientConfig;
-import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
-import com.github.dockerjava.transport.DockerHttpClient;
-import lombok.Data;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import java.time.Duration;
-
-@Data
+@Slf4j
 @Configuration
-@ConfigurationProperties(prefix = "sandbox.docker")
 public class DockerConfig {
 
-    /**
-     * Docker Host
-     * Linux: unix:///var/run/docker.sock
-     * Windows: tcp://localhost:2375 或 npipe:////./pipe/docker_engine
-     */
-    private String host = "unix:///var/run/docker.sock";
-    
-    /**
-     * Docker API 版本
-     */
-    private String apiVersion = "1.41";
-    
-    /**
-     * 连接超时（毫秒）
-     */
-    private Integer connectionTimeout = 30000;
-    
-    /**
-     * 读取超时（毫秒）
-     */
-    private Integer readTimeout = 60000;
+    @Value("${sandbox.docker.host:unix:///var/run/docker.sock}")
+    private String dockerHost;
+
+    @Value("${sandbox.docker.connect-timeout:30}")
+    private int connectTimeout;       // 秒
+
+    @Value("${sandbox.docker.response-timeout:60}")
+    private int responseTimeout;      // 秒
+
+    @Value("${sandbox.docker.max-connections:100}")
+    private int maxConnections;
 
     @Bean
     public DockerClientConfig dockerClientConfig() {
         return DefaultDockerClientConfig.createDefaultConfigBuilder()
-                .withDockerHost(host)
-                .withApiVersion(apiVersion)
+                .withDockerHost(dockerHost)
+                .withDockerTlsVerify(false)
                 .build();
     }
 
     @Bean
     public DockerHttpClient dockerHttpClient(DockerClientConfig config) {
-        return new ApacheDockerHttpClient.Builder()
+        return new ZerodepDockerHttpClient.Builder()
                 .dockerHost(config.getDockerHost())
-                .maxConnections(100)
-                .connectionTimeout(Duration.ofMillis(connectionTimeout))
-                .responseTimeout(Duration.ofMillis(readTimeout))
+                .sslConfig(config.getSSLConfig())
+                .connectionTimeout(Duration.ofSeconds(connectTimeout))
+                .responseTimeout(Duration.ofSeconds(responseTimeout))
+                .maxConnections(maxConnections)
                 .build();
     }
 
     @Bean
     public DockerClient dockerClient(DockerClientConfig config, DockerHttpClient httpClient) {
-        return DockerClientImpl.getInstance(config, httpClient);
+        DockerClient client = DockerClientImpl.getInstance(config, httpClient);
+        // 启动时验证 Docker 连接
+        var info = client.infoCmd().exec();
+        log.info("Docker 连接成功, Server Version: {}", info.getServerVersion());
+        return client;
     }
 }
 ```
 
+> 注意：使用 `ZerodepDockerHttpClient`（zerodep transport），内置 Unix socket 支持，无需 Apache HttpClient5。
+
 ### 2.2 执行限制配置
 
 ```java
-package com.github.ezzziy.codesandbox.config;
-
-import lombok.Data;
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.context.annotation.Configuration;
-
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "sandbox.execution")
 public class ExecutionConfig {
 
-    /**
-     * 默认时间限制（毫秒）
-     */
-    private Integer defaultTimeLimit = 5000;
-
-    /**
-     * 默认内存限制（MB）
-     */
-    private Integer defaultMemoryLimit = 256;
-
-    /**
-     * 最大时间限制（毫秒）
-     */
-    private Integer maxTimeLimit = 30000;
-
-    /**
-     * 最大内存限制（MB）
-     */
-    private Integer maxMemoryLimit = 512;
-
-    /**
-     * 最大输出大小（字节）
-     */
-    private Integer maxOutputSize = 65536;  // 64KB
-
-    /**
-     * 最大进程数
-     */
-    private Integer maxProcessCount = 10;
-
-    /**
-     * 编译超时时间（毫秒）
-     */
-    private Integer compileTimeout = 30000;
-
-    /**
-     * 容器启动超时（秒）
-     */
-    private Integer containerStartTimeout = 10;
+    private int compileTimeout = 30;           // 编译超时（秒）
+    private int runTimeout = 10;               // 运行超时（秒）
+    private int totalTimeout = 300;            // 总超时（秒）
+    private int memoryLimit = 256;             // 内存限制（MB）
+    private double cpuLimit = 1.0;             // CPU 限制
+    private int outputLimit = 65536;           // 最大输出（字节）
+    private int maxProcesses = 1024;           // 最大进程数
+    private int maxOpenFiles = 256;            // 最大打开文件数
+    private int maxTestCases = 100;            // 最大测试用例数
+    private String workDir = "/tmp/sandbox";   // 宿主机工作目录
+    private boolean enableCodeScan = true;     // 是否启用危险代码扫描
+    private int maxConcurrentContainers = 10;  // 最大并发容器数
 }
 ```
 
@@ -143,960 +91,347 @@ public class ExecutionConfig {
 
 ## 3. 容器管理器
 
-### 3.1 ContainerManager 接口
+### 3.1 ContainerManager
+
+`ContainerManager` 是一个具体类（非接口），负责 Docker 容器的全生命周期管理。
 
 ```java
-package com.github.ezzziy.codesandbox.docker;
-
-import com.github.ezzziy.codesandbox.model.dto.ContainerConfig;
-import com.github.ezzziy.codesandbox.model.dto.ExecResult;
-
-public interface ContainerManager {
-
-    /**
-     * 创建容器
-     * @param config 容器配置
-     * @return 容器 ID
-     */
-    String createContainer(ContainerConfig config);
-
-    /**
-     * 启动容器
-     * @param containerId 容器 ID
-     */
-    void startContainer(String containerId);
-
-    /**
-     * 在容器中执行命令
-     * @param containerId 容器 ID
-     * @param command 命令
-     * @param timeout 超时时间（毫秒）
-     * @return 执行结果
-     */
-    ExecResult execInContainer(String containerId, String[] command, long timeout);
-
-    /**
-     * 复制文件到容器
-     * @param containerId 容器 ID
-     * @param localPath 本地路径
-     * @param containerPath 容器内路径
-     */
-    void copyToContainer(String containerId, String localPath, String containerPath);
-
-    /**
-     * 从容器复制文件
-     * @param containerId 容器 ID
-     * @param containerPath 容器内路径
-     * @param localPath 本地路径
-     */
-    void copyFromContainer(String containerId, String containerPath, String localPath);
-
-    /**
-     * 获取容器资源使用情况
-     * @param containerId 容器 ID
-     * @return 内存使用量（字节）
-     */
-    long getMemoryUsage(String containerId);
-
-    /**
-     * 停止容器
-     * @param containerId 容器 ID
-     */
-    void stopContainer(String containerId);
-
-    /**
-     * 删除容器
-     * @param containerId 容器 ID
-     */
-    void removeContainer(String containerId);
-
-    /**
-     * 强制清理容器（停止 + 删除）
-     * @param containerId 容器 ID
-     */
-    void forceCleanup(String containerId);
-}
-```
-
-### 3.2 ContainerManager 实现
-
-```java
-package com.github.ezzziy.codesandbox.docker;
-
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.async.ResultCallback;
-import com.github.dockerjava.api.command.CreateContainerCmd;
-import com.github.dockerjava.api.command.CreateContainerResponse;
-import com.github.dockerjava.api.command.ExecCreateCmdResponse;
-import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.*;
-import com.github.ezzziy.codesandbox.config.ExecutionConfig;
-import com.github.ezzziy.codesandbox.exception.ContainerException;
-import com.github.ezzziy.codesandbox.model.dto.ContainerConfig;
-import com.github.ezzziy.codesandbox.model.dto.ExecResult;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.io.IOUtils;
-import org.springframework.stereotype.Component;
-
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.concurrent.*;
-
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class DockerContainerManager implements ContainerManager {
+public class ContainerManager {
 
     private final DockerClient dockerClient;
     private final ExecutionConfig executionConfig;
 
-    @Override
-    public String createContainer(ContainerConfig config) {
-        try {
-            // 构建 HostConfig（资源限制）
-            HostConfig hostConfig = HostConfig.newHostConfig()
-                    // 内存限制
-                    .withMemory(config.getMemoryLimit() * 1024 * 1024L)
-                    .withMemorySwap(config.getMemoryLimit() * 1024 * 1024L)  // 禁用 swap
-                    // CPU 限制（纳秒，100000 = 0.1 核）
-                    .withCpuQuota(100000L)
-                    .withCpuPeriod(100000L)
-                    // 进程数限制（防止 fork bomb）
-                    .withPidsLimit((long) executionConfig.getMaxProcessCount())
-                    // 禁用网络
-                    .withNetworkMode(config.getEnableNetwork() ? "bridge" : "none")
-                    // 只读根文件系统
-                    .withReadonlyRootfs(true)
-                    // 挂载临时工作目录（可写）
-                    .withBinds(new Bind(config.getWorkDir(), new Volume("/workspace")))
-                    // 临时文件系统（可写的 /tmp）
-                    .withTmpFs(Map.of("/tmp", "rw,noexec,nosuid,size=64m"))
-                    // 安全选项
-                    .withSecurityOpts(List.of("no-new-privileges"))
-                    // 禁用所有 capabilities
-                    .withCapDrop(Capability.ALL)
-                    // OOM 设置
-                    .withOomKillDisable(false);
-
-            CreateContainerCmd createCmd = dockerClient.createContainerCmd(config.getImage())
-                    .withHostConfig(hostConfig)
-                    .withWorkingDir("/workspace")
-                    .withUser("nobody")  // 非 root 用户运行
-                    .withAttachStdin(true)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .withTty(false)
-                    .withStdinOpen(true)
-                    .withCmd("/bin/sh", "-c", "sleep infinity");  // 保持容器运行
-
-            // 设置环境变量
-            if (config.getEnvVars() != null && !config.getEnvVars().isEmpty()) {
-                createCmd.withEnv(config.getEnvVars().entrySet().stream()
-                        .map(e -> e.getKey() + "=" + e.getValue())
-                        .toList());
-            }
-
-            CreateContainerResponse response = createCmd.exec();
-            String containerId = response.getId();
-            
-            log.debug("容器创建成功: containerId={}, image={}", 
-                    containerId.substring(0, 12), config.getImage());
-            
-            return containerId;
-            
-        } catch (Exception e) {
-            log.error("创建容器失败: image={}", config.getImage(), e);
-            throw new ContainerException("创建容器失败: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public void startContainer(String containerId) {
-        try {
-            dockerClient.startContainerCmd(containerId).exec();
-            
-            // 等待容器启动
-            int maxWait = executionConfig.getContainerStartTimeout();
-            for (int i = 0; i < maxWait; i++) {
-                InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
-                if (Boolean.TRUE.equals(inspect.getState().getRunning())) {
-                    log.debug("容器启动成功: containerId={}", containerId.substring(0, 12));
-                    return;
-                }
-                Thread.sleep(100);
-            }
-            
-            throw new ContainerException("容器启动超时");
-            
-        } catch (ContainerException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("启动容器失败: containerId={}", containerId, e);
-            throw new ContainerException("启动容器失败: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public ExecResult execInContainer(String containerId, String[] command, long timeout) {
-        long startTime = System.currentTimeMillis();
-        
-        try {
-            // 创建执行实例
-            ExecCreateCmdResponse execCreate = dockerClient.execCreateCmd(containerId)
-                    .withCmd(command)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .withAttachStdin(false)
-                    .exec();
-
-            String execId = execCreate.getId();
-
-            // 收集输出
-            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-            
-            CompletableFuture<Void> future = new CompletableFuture<>();
-
-            dockerClient.execStartCmd(execId)
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            try {
-                                byte[] payload = frame.getPayload();
-                                if (frame.getStreamType() == StreamType.STDOUT) {
-                                    stdout.write(payload);
-                                } else if (frame.getStreamType() == StreamType.STDERR) {
-                                    stderr.write(payload);
-                                }
-                                
-                                // 检查输出大小限制
-                                if (stdout.size() + stderr.size() > executionConfig.getMaxOutputSize()) {
-                                    log.warn("输出超限，强制终止: execId={}", execId);
-                                    close();
-                                }
-                            } catch (IOException e) {
-                                log.error("写入输出失败", e);
-                            }
-                        }
-
-                        @Override
-                        public void onComplete() {
-                            future.complete(null);
-                        }
-
-                        @Override
-                        public void onError(Throwable throwable) {
-                            future.completeExceptionally(throwable);
-                        }
-                    });
-
-            // 等待执行完成（带超时）
-            try {
-                future.get(timeout, TimeUnit.MILLISECONDS);
-            } catch (TimeoutException e) {
-                log.warn("执行超时: containerId={}, timeout={}ms", containerId.substring(0, 12), timeout);
-                return ExecResult.builder()
-                        .stdout(truncateOutput(stdout.toString(StandardCharsets.UTF_8)))
-                        .stderr("Time Limit Exceeded")
-                        .exitCode(-1)
-                        .timeUsed(timeout)
-                        .timedOut(true)
-                        .build();
-            }
-
-            // 获取退出码
-            Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
-            long timeUsed = System.currentTimeMillis() - startTime;
-
-            return ExecResult.builder()
-                    .stdout(truncateOutput(stdout.toString(StandardCharsets.UTF_8)))
-                    .stderr(truncateOutput(stderr.toString(StandardCharsets.UTF_8)))
-                    .exitCode(exitCode != null ? exitCode.intValue() : -1)
-                    .timeUsed(timeUsed)
-                    .timedOut(false)
-                    .build();
-
-        } catch (Exception e) {
-            log.error("容器内执行命令失败: containerId={}", containerId, e);
-            long timeUsed = System.currentTimeMillis() - startTime;
-            return ExecResult.builder()
-                    .stdout("")
-                    .stderr("Execution failed: " + e.getMessage())
-                    .exitCode(-1)
-                    .timeUsed(timeUsed)
-                    .timedOut(false)
-                    .build();
-        }
-    }
-
-    @Override
-    public void copyToContainer(String containerId, String localPath, String containerPath) {
-        try {
-            Path path = Path.of(localPath);
-            
-            // 创建 tar 归档
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(baos)) {
-                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
-                
-                if (Files.isDirectory(path)) {
-                    // 递归添加目录
-                    Files.walk(path).forEach(file -> {
-                        try {
-                            String entryName = path.relativize(file).toString();
-                            if (entryName.isEmpty()) return;
-                            
-                            TarArchiveEntry entry = new TarArchiveEntry(file.toFile(), entryName);
-                            tar.putArchiveEntry(entry);
-                            
-                            if (Files.isRegularFile(file)) {
-                                Files.copy(file, tar);
-                            }
-                            tar.closeArchiveEntry();
-                        } catch (IOException e) {
-                            throw new UncheckedIOException(e);
-                        }
-                    });
-                } else {
-                    // 单个文件
-                    TarArchiveEntry entry = new TarArchiveEntry(path.toFile(), path.getFileName().toString());
-                    tar.putArchiveEntry(entry);
-                    Files.copy(path, tar);
-                    tar.closeArchiveEntry();
-                }
-            }
-            
-            // 复制到容器
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(baos.toByteArray()))
-                    .withRemotePath(containerPath)
-                    .exec();
-                    
-            log.debug("文件复制到容器: {} -> {}:{}", localPath, containerId.substring(0, 12), containerPath);
-            
-        } catch (Exception e) {
-            log.error("复制文件到容器失败: containerId={}, path={}", containerId, localPath, e);
-            throw new ContainerException("复制文件失败: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public void copyFromContainer(String containerId, String containerPath, String localPath) {
-        try (InputStream is = dockerClient.copyArchiveFromContainerCmd(containerId, containerPath).exec();
-             TarArchiveInputStream tar = new TarArchiveInputStream(is)) {
-            
-            TarArchiveEntry entry;
-            while ((entry = tar.getNextEntry()) != null) {
-                Path outputPath = Path.of(localPath, entry.getName());
-                if (entry.isDirectory()) {
-                    Files.createDirectories(outputPath);
-                } else {
-                    Files.createDirectories(outputPath.getParent());
-                    try (OutputStream os = Files.newOutputStream(outputPath)) {
-                        IOUtils.copy(tar, os);
-                    }
-                }
-            }
-            
-            log.debug("从容器复制文件: {}:{} -> {}", containerId.substring(0, 12), containerPath, localPath);
-            
-        } catch (Exception e) {
-            log.error("从容器复制文件失败: containerId={}, path={}", containerId, containerPath, e);
-            throw new ContainerException("复制文件失败: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public long getMemoryUsage(String containerId) {
-        try {
-            Statistics[] stats = {null};
-            CountDownLatch latch = new CountDownLatch(1);
-            
-            dockerClient.statsCmd(containerId).withNoStream(true)
-                    .exec(new ResultCallback.Adapter<Statistics>() {
-                        @Override
-                        public void onNext(Statistics statistics) {
-                            stats[0] = statistics;
-                            latch.countDown();
-                        }
-                    });
-            
-            if (latch.await(5, TimeUnit.SECONDS) && stats[0] != null) {
-                return stats[0].getMemoryStats().getUsage();
-            }
-            return 0;
-        } catch (Exception e) {
-            log.warn("获取容器内存使用失败: containerId={}", containerId, e);
-            return 0;
-        }
-    }
-
-    @Override
-    public void stopContainer(String containerId) {
-        try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(1).exec();
-            log.debug("容器已停止: containerId={}", containerId.substring(0, 12));
-        } catch (Exception e) {
-            log.warn("停止容器失败（可能已停止）: containerId={}", containerId);
-        }
-    }
-
-    @Override
-    public void removeContainer(String containerId) {
-        try {
-            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
-            log.debug("容器已删除: containerId={}", containerId.substring(0, 12));
-        } catch (Exception e) {
-            log.warn("删除容器失败: containerId={}", containerId);
-        }
-    }
-
-    @Override
-    public void forceCleanup(String containerId) {
-        if (containerId == null) return;
-        try {
-            stopContainer(containerId);
-        } finally {
-            removeContainer(containerId);
-        }
-    }
+    /**
+     * 创建容器
+     */
+    public String createContainer(LanguageStrategy strategy, String requestId, String workDir);
 
     /**
-     * 截断过长的输出
+     * 启动容器
      */
-    private String truncateOutput(String output) {
-        int maxSize = executionConfig.getMaxOutputSize();
-        if (output.length() > maxSize) {
-            return output.substring(0, maxSize) + "\n... [output truncated]";
-        }
-        return output;
-    }
+    public void startContainer(String containerId);
+
+    /**
+     * 停止容器
+     */
+    public void stopContainer(String containerId);
+
+    /**
+     * 删除容器（stop + force remove）
+     */
+    public void removeContainer(String containerId);
+
+    /**
+     * 获取任务工作目录路径
+     */
+    public String getTaskDirectory(String jobId);
+
+    /**
+     * 清理任务目录（在容器内执行 rm -rf）
+     */
+    public void cleanupTaskDirectory(String containerId, String taskDir);
+
+    /**
+     * 强制终止容器
+     */
+    public void killContainer(String containerId);
+
+    /**
+     * 清理容器工作目录内所有文件
+     */
+    public void cleanContainer(String containerId);
+
+    /**
+     * 检查容器是否正在运行
+     */
+    public boolean isContainerRunning(String containerId);
+
+    /**
+     * 获取活跃容器数
+     */
+    public int getActiveContainerCount();
 }
+```
+
+### 3.2 容器创建参数
+
+```java
+private HostConfig buildHostConfig(String workDir) {
+    long memoryBytes = executionConfig.getMemoryLimit() * 1024L * 1024L;
+    long cpuPeriod = 100000L;
+    long cpuQuota = (long) (cpuPeriod * executionConfig.getCpuLimit());
+
+    HostConfig hostConfig = HostConfig.newHostConfig()
+            .withMemory(memoryBytes)
+            .withMemorySwap(memoryBytes)        // 禁用 swap
+            .withOomKillDisable(false)
+            .withCpuPeriod(cpuPeriod)
+            .withCpuQuota(cpuQuota)
+            .withPidsLimit((long) executionConfig.getMaxProcesses())
+            .withReadonlyRootfs(false)
+            .withCapDrop(Capability.ALL)
+            .withSecurityOpts(List.of("no-new-privileges:true"))
+            .withUlimits(List.of(
+                    new Ulimit("nofile", maxOpenFiles, maxOpenFiles),
+                    new Ulimit("nproc", maxProcesses, maxProcesses),
+                    new Ulimit("fsize", outputLimit, outputLimit)
+            ))
+            .withTmpFs(Map.of("/tmp", "rw,noexec,nosuid,size=64m"));
+
+    // 挂载卷
+    if (workDir != null) {
+        hostConfig.withBinds(
+                new Bind(workDir, new Volume("/sandbox/workspace")),
+                new Bind("/var/lib/sandbox-inputs", new Volume("/sandbox/inputs"), AccessMode.ro)
+        );
+    } else {
+        hostConfig.withBinds(
+                new Bind("/var/lib/sandbox-inputs", new Volume("/sandbox/inputs"), AccessMode.ro)
+        );
+    }
+    return hostConfig;
+}
+```
+
+容器创建命令：
+
+```java
+dockerClient.createContainerCmd(image)
+        .withName(containerName)
+        .withHostConfig(hostConfig)
+        .withNetworkDisabled(true)
+        .withWorkingDir("/sandbox/workspace")
+        .withEnv(envList)                    // LANG=C.UTF-8, LC_ALL=C.UTF-8, ...
+        .withCmd("tail", "-f", "/dev/null")  // 保持容器运行
+        .withStdinOpen(true)
+        .withTty(false)
+        .exec();
 ```
 
 ---
 
-## 4. Docker 执行器
+## 4. 容器池
 
-### 4.1 CodeExecutor 接口
+### 4.1 ContainerPool
 
-```java
-package com.github.ezzziy.codesandbox.executor;
-
-import com.github.ezzziy.codesandbox.model.dto.ExecutionContext;
-import com.github.ezzziy.codesandbox.model.response.ExecutionResult;
-
-public interface CodeExecutor {
-
-    /**
-     * 执行代码
-     * @param context 执行上下文
-     * @return 执行结果
-     */
-    ExecutionResult execute(ExecutionContext context);
-}
-```
-
-### 4.2 ExecutionContext 上下文
+容器池为每种语言维护一组预热的容器，避免每次执行都创建/销毁容器。
 
 ```java
-package com.github.ezzziy.codesandbox.model.dto;
-
-import lombok.Builder;
-import lombok.Data;
-
-@Data
-@Builder
-public class ExecutionContext {
-    
-    /**
-     * 执行 ID
-     */
-    private String executionId;
-    
-    /**
-     * 语言
-     */
-    private String language;
-    
-    /**
-     * 语言版本
-     */
-    private String languageVersion;
-    
-    /**
-     * 用户代码
-     */
-    private String code;
-    
-    /**
-     * 输入数据
-     */
-    private String inputData;
-    
-    /**
-     * 时间限制（毫秒）
-     */
-    private Integer timeLimit;
-    
-    /**
-     * 内存限制（MB）
-     */
-    private Integer memoryLimit;
-    
-    /**
-     * 是否启用网络
-     */
-    private Boolean enableNetwork;
-    
-    /**
-     * 工作目录
-     */
-    private String workDir;
-}
-```
-
-### 4.3 DockerCodeExecutor 实现
-
-```java
-package com.github.ezzziy.codesandbox.executor;
-
-import com.github.ezzziy.codesandbox.config.ExecutionConfig;
-import com.github.ezzziy.codesandbox.docker.ContainerManager;
-import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategy;
-import com.github.ezzziy.codesandbox.executor.strategy.LanguageStrategyFactory;
-import com.github.ezzziy.codesandbox.common.enums.ExecutionStatus;
-import com.github.ezzziy.codesandbox.model.response.ExecutionResult;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class DockerCodeExecutor implements CodeExecutor {
+public class ContainerPool {
 
-    private final ContainerManager containerManager;
-    private final LanguageStrategyFactory strategyFactory;
-    private final ExecutionConfig executionConfig;
+    @Value("${sandbox.pool.min-size:2}")
+    private int minPoolSize;         // 每语言最小池大小
 
-    @Override
-    public ExecutionResult execute(ExecutionContext context) {
-        long startTime = System.currentTimeMillis();
-        String containerId = null;
-        Path workDir = null;
+    @Value("${sandbox.pool.max-size:10}")
+    private int maxPoolSize;         // 每语言最大池大小
 
-        try {
-            // 1. 获取语言策略
-            LanguageStrategy strategy = strategyFactory.getStrategy(
-                    context.getLanguage(),
-                    context.getLanguageVersion()
-            );
+    @Value("${sandbox.pool.max-idle-minutes:10}")
+    private int maxIdleMinutes;      // 空闲超时
 
-            // 2. 创建临时工作目录
-            workDir = createWorkDir(context.getExecutionId());
-            context.setWorkDir(workDir.toString());
+    @Value("${sandbox.pool.max-use-count:100}")
+    private int maxUseCount;         // 单容器最大使用次数
 
-            // 3. 写入源代码文件
-            writeSourceCode(workDir, strategy.getSourceFileName(), context.getCode());
+    public PooledContainer acquireContainer(LanguageStrategy strategy);
+    public void releaseContainer(PooledContainer container);
 
-            // 4. 写入输入数据
-            writeInputData(workDir, context.getInputData());
+    @Scheduled(fixedDelay = 60000)
+    public void cleanIdleContainers();       // 清理空闲超时容器
 
-            // 5. 创建并启动容器
-            ContainerConfig containerConfig = ContainerConfig.builder()
-                    .image(strategy.getDockerImage())
-                    .workDir(workDir.toString())
-                    .memoryLimit(context.getMemoryLimit())
-                    .enableNetwork(context.getEnableNetwork())
-                    .build();
+    @Scheduled(fixedDelay = 600000)
+    public void cleanZombieContainers();     // 清理僵尸容器
 
-            containerId = containerManager.createContainer(containerConfig);
-            containerManager.startContainer(containerId);
-
-            // 6. 编译（如果需要）
-            CompileResult compileResult = null;
-            if (strategy.needsCompilation()) {
-                compileResult = compile(containerId, strategy, context);
-                if (!compileResult.getSuccess()) {
-                    return ExecutionResult.builder()
-                            .status(ExecutionStatus.COMPILE_ERROR)
-                            .compileResult(compileResult)
-                            .executionId(context.getExecutionId())
-                            .totalTime(System.currentTimeMillis() - startTime)
-                            .build();
-                }
-            }
-
-            // 7. 执行
-            RunResult runResult = run(containerId, strategy, context);
-
-            // 8. 确定执行状态
-            ExecutionStatus status = determineStatus(runResult, context);
-
-            return ExecutionResult.builder()
-                    .status(status)
-                    .compileResult(compileResult)
-                    .runResult(runResult)
-                    .executionId(context.getExecutionId())
-                    .totalTime(System.currentTimeMillis() - startTime)
-                    .build();
-
-        } catch (Exception e) {
-            log.error("执行失败: executionId={}", context.getExecutionId(), e);
-            return ExecutionResult.builder()
-                    .status(ExecutionStatus.SYSTEM_ERROR)
-                    .errorMessage(e.getMessage())
-                    .executionId(context.getExecutionId())
-                    .totalTime(System.currentTimeMillis() - startTime)
-                    .build();
-        } finally {
-            // 9. 清理资源
-            cleanup(containerId, workDir);
-        }
-    }
-
-    /**
-     * 编译代码
-     */
-    private CompileResult compile(String containerId, LanguageStrategy strategy, ExecutionContext context) {
-        log.debug("开始编译: executionId={}, language={}", context.getExecutionId(), context.getLanguage());
-
-        String[] compileCommand = strategy.getCompileCommand(context);
-        long compileTimeout = executionConfig.getCompileTimeout();
-
-        ExecResult execResult = containerManager.execInContainer(containerId, compileCommand, compileTimeout);
-
-        boolean success = execResult.getExitCode() == 0 && !execResult.getTimedOut();
-
-        return CompileResult.builder()
-                .success(success)
-                .output(execResult.getStdout())
-                .errorOutput(execResult.getStderr())
-                .timeUsed(execResult.getTimeUsed())
-                .build();
-    }
-
-    /**
-     * 执行代码
-     */
-    private RunResult run(String containerId, LanguageStrategy strategy, ExecutionContext context) {
-        log.debug("开始执行: executionId={}, timeLimit={}ms", context.getExecutionId(), context.getTimeLimit());
-
-        // 构建执行命令（带输入重定向）
-        String[] runCommand = strategy.getRunCommand(context);
-
-        // 实际的执行命令需要处理输入重定向
-        String[] wrappedCommand = wrapWithInputRedirect(runCommand);
-
-        ExecResult execResult = containerManager.execInContainer(
-                containerId,
-                wrappedCommand,
-                context.getTimeLimit() + 1000  // 额外 1 秒缓冲
-        );
-
-        // 获取内存使用
-        long memoryUsed = containerManager.getMemoryUsage(containerId) / 1024;  // 转为 KB
-
-        // 解析退出信号
-        String signal = parseSignal(execResult.getExitCode());
-
-        return RunResult.builder()
-                .stdout(execResult.getStdout())
-                .stderr(execResult.getStderr())
-                .exitCode(execResult.getExitCode())
-                .timeUsed(execResult.getTimeUsed())
-                .memoryUsed(memoryUsed)
-                .signal(signal)
-                .build();
-    }
-
-    /**
-     * 确定执行状态
-     */
-    private ExecutionStatus determineStatus(RunResult runResult, ExecutionContext context) {
-        // 超时
-        if (runResult.getTimeUsed() >= context.getTimeLimit()) {
-            return ExecutionStatus.TIME_LIMIT_EXCEEDED;
-        }
-
-        // 内存超限
-        if (runResult.getMemoryUsed() > context.getMemoryLimit() * 1024L) {
-            return ExecutionStatus.MEMORY_LIMIT_EXCEEDED;
-        }
-
-        // 运行时错误（非零退出码）
-        if (runResult.getExitCode() != 0) {
-            // 特殊信号处理
-            if (runResult.getSignal() != null) {
-                if ("SIGKILL".equals(runResult.getSignal()) &&
-                        runResult.getMemoryUsed() > context.getMemoryLimit() * 1024L * 0.9) {
-                    return ExecutionStatus.MEMORY_LIMIT_EXCEEDED;
-                }
-            }
-            return ExecutionStatus.RUNTIME_ERROR;
-        }
-
-        return ExecutionStatus.ACCEPTED;
-    }
-
-    /**
-     * 包装命令以支持输入重定向
-     */
-    private String[] wrapWithInputRedirect(String[] command) {
-        String cmd = String.join(" ", command);
-        return new String[]{"/bin/sh", "-c", cmd + " < /workspace/input.txt"};
-    }
-
-    /**
-     * 解析退出信号
-     */
-    private String parseSignal(int exitCode) {
-        if (exitCode <= 0) return null;
-        if (exitCode > 128) {
-            int signal = exitCode - 128;
-            return switch (signal) {
-                case 9 -> "SIGKILL";
-                case 11 -> "SIGSEGV";
-                case 6 -> "SIGABRT";
-                case 8 -> "SIGFPE";
-                case 15 -> "SIGTERM";
-                default -> "SIG" + signal;
-            };
-        }
-        return null;
-    }
-
-    /**
-     * 创建工作目录
-     */
-    private Path createWorkDir(String executionId) throws IOException {
-        Path baseDir = Path.of(System.getProperty("java.io.tmpdir"), "sandbox", executionId);
-        Files.createDirectories(baseDir);
-        return baseDir;
-    }
-
-    /**
-     * 写入源代码文件
-     */
-    private void writeSourceCode(Path workDir, String fileName, String code) throws IOException {
-        Path sourceFile = workDir.resolve(fileName);
-        Files.writeString(sourceFile, code, StandardCharsets.UTF_8);
-    }
-
-    /**
-     * 写入输入数据
-     */
-    private void writeInputData(Path workDir, String inputData) throws IOException {
-        Path inputFile = workDir.resolve("input.txt");
-        Files.writeString(inputFile, inputData != null ? inputData : "", StandardCharsets.UTF_8);
-    }
-
-    /**
-     * 清理资源
-     */
-    private void cleanup(String containerId, Path workDir) {
-        // 清理容器
-        if (containerId != null) {
-            try {
-                containerManager.forceCleanup(containerId);
-            } catch (Exception e) {
-                log.warn("清理容器失败: containerId={}", containerId);
-            }
-        }
-
-        // 清理工作目录
-        if (workDir != null) {
-            try {
-                deleteRecursively(workDir);
-            } catch (Exception e) {
-                log.warn("清理工作目录失败: workDir={}", workDir);
-            }
-        }
-    }
-
-    /**
-     * 递归删除目录
-     */
-    private void deleteRecursively(Path path) throws IOException {
-        if (Files.isDirectory(path)) {
-            try (var entries = Files.list(path)) {
-                for (Path entry : entries.toList()) {
-                    deleteRecursively(entry);
-                }
-            }
-        }
-        Files.deleteIfExists(path);
-    }
+    @PreDestroy
+    public void destroy();                   // 销毁所有容器
 }
+```
+
+容器生命周期：
+
+```
+create → start → [ready in pool] → acquire → execute → release → [ready in pool] → ...
+                                                                       ↓
+                                                            (使用次数达 maxUseCount)
+                                                                       ↓
+                                                               remove → recreate
 ```
 
 ---
 
-## 5. Docker 命令示例
+## 5. DockerCodeExecutor
 
-### 5.1 完整的 Docker Run 命令
+### 5.1 执行入口
 
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class DockerCodeExecutor {
+
+    public record ExecuteResult(String compileOutput, List<ExecutionResult> results) {}
+
+    public ExecuteResult execute(LanguageStrategy strategy,
+                                 String code,
+                                 List<String> inputList,
+                                 String requestId,
+                                 int timeLimit,
+                                 int memoryLimit) {
+        // 1. 危险代码扫描（如果启用）
+        // 2. 从容器池获取容器（或传统模式创建新容器）
+        // 3. 写入源代码到容器任务目录
+        // 4. 编译（如需要）
+        // 5. 逐个运行测试用例
+        // 6. 清理任务目录，归还容器
+    }
+}
+```
+
+### 5.2 Shell 命令包装（计时 + 内存采集）
+
+所有命令通过 shell 脚本包装，采集精确的执行时间和内存用量：
+
+**有输入路径：**
 ```bash
-# C/C++ 执行示例
-docker run --rm \
-  --name sandbox-exec-uuid \
-  --memory=256m \
-  --memory-swap=256m \
-  --cpus=0.5 \
-  --pids-limit=10 \
-  --network=none \
-  --read-only \
-  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --security-opt=no-new-privileges \
-  --cap-drop=ALL \
-  --user=nobody \
-  -v /tmp/sandbox/work:/workspace:rw \
-  -w /workspace \
-  gcc:11-bullseye \
-  /bin/sh -c "g++ -O2 -std=c++11 -o main main.cpp && timeout 5 ./main < input.txt"
-
-# Java 执行示例
-docker run --rm \
-  --name sandbox-exec-uuid \
-  --memory=512m \
-  --memory-swap=512m \
-  --cpus=1.0 \
-  --pids-limit=50 \
-  --network=none \
-  --read-only \
-  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
-  --security-opt=no-new-privileges \
-  --cap-drop=ALL \
-  --user=nobody \
-  -v /tmp/sandbox/work:/workspace:rw \
-  -w /workspace \
-  openjdk:11-jdk-slim \
-  /bin/sh -c "javac -encoding UTF-8 Main.java && timeout 10 java -Xmx256m Main < input.txt"
-
-# Python 执行示例
-docker run --rm \
-  --name sandbox-exec-uuid \
-  --memory=256m \
-  --memory-swap=256m \
-  --cpus=0.5 \
-  --pids-limit=10 \
-  --network=none \
-  --read-only \
-  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-  --security-opt=no-new-privileges \
-  --cap-drop=ALL \
-  --user=nobody \
-  -v /tmp/sandbox/work:/workspace:rw \
-  -w /workspace \
-  python:3.10-slim \
-  /bin/sh -c "timeout 5 python3 main.py < input.txt"
+cd <taskDir> && \
+MEMFILE=/tmp/mem_$$; \
+START=$(date +%s%N); \
+printf '%s' '<input>' | /usr/bin/time -f '%M' -o $MEMFILE sh -c 'exec <cmd>'; \
+EXIT_CODE=$?; \
+END=$(date +%s%N); \
+echo '__EXEC_TIME_NS__:'$((END-START)); \
+MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; \
+echo '__EXEC_MEM_KB__:'$MEM; \
+exit $EXIT_CODE
 ```
 
-### 5.2 参数说明
+**无输入路径：**
+```bash
+cd <taskDir> && \
+MEMFILE=/tmp/mem_$$; \
+START=$(date +%s%N); \
+/usr/bin/time -f '%M' -o $MEMFILE sh -c 'exec <cmd>'; \
+EXIT_CODE=$?; \
+END=$(date +%s%N); \
+echo '__EXEC_TIME_NS__:'$((END-START)); \
+MEM=$(cat $MEMFILE 2>/dev/null || echo 0); rm -f $MEMFILE; \
+echo '__EXEC_MEM_KB__:'$MEM; \
+exit $EXIT_CODE
+```
 
-| 参数 | 说明 |
-|------|------|
-| `--rm` | 容器退出后自动删除 |
-| `--memory=256m` | 内存限制 256MB |
-| `--memory-swap=256m` | 禁用 swap（等于内存限制） |
-| `--cpus=0.5` | CPU 限制 0.5 核 |
-| `--pids-limit=10` | 最大进程数 10（防止 fork bomb） |
-| `--network=none` | 禁用网络 |
-| `--read-only` | 只读根文件系统 |
-| `--tmpfs /tmp:...` | 可写的临时目录 |
-| `--security-opt=no-new-privileges` | 禁止提权 |
-| `--cap-drop=ALL` | 删除所有 capabilities |
-| `--user=nobody` | 非 root 用户运行 |
-| `-v .../workspace:rw` | 挂载工作目录 |
-| `timeout 5` | 执行超时 5 秒 |
+关键设计：
+- `EXIT_CODE=$?` 在用户命令执行后立即捕获退出码
+- `exit $EXIT_CODE` 在脚本末尾传递退出码给 Docker exec
+- `/usr/bin/time -o $MEMFILE` 将内存值写入临时文件，不污染 stdout/stderr
+- 时间标记 `__EXEC_TIME_NS__` 和 `__EXEC_MEM_KB__` 从 stdout 末尾提取后移除
 
----
-
-## 6. 资源监控与采集
-
-### 6.1 时间测量
+### 5.3 命令执行与结果解析
 
 ```java
-/**
- * 精确的执行时间测量
- */
-public class TimeMonitor {
-    
-    private long startTime;
-    private long endTime;
-    
-    public void start() {
-        this.startTime = System.nanoTime();
-    }
-    
-    public void stop() {
-        this.endTime = System.nanoTime();
-    }
-    
-    /**
-     * 获取执行时间（毫秒）
-     */
-    public long getTimeUsed() {
-        return (endTime - startTime) / 1_000_000;
-    }
-    
-    /**
-     * 获取执行时间（微秒，用于高精度场景）
-     */
-    public long getTimeUsedMicros() {
-        return (endTime - startTime) / 1_000;
-    }
+private CommandResult executeCommand(String containerId, String[] cmd,
+                                      String input, long timeoutMs) {
+    // 1. 构建计时 shell 命令
+    // 2. 创建 Docker exec 实例（withUser("sandbox")）
+    // 3. 等待完成或超时
+    // 4. 从 stdout 提取时间/内存标记
+    // 5. 检查输出是否超限
+    // 6. 返回 CommandResult（success/failure/timeout/error）
 }
 ```
 
-### 6.2 内存采集
+### 5.4 编译与运行
 
 ```java
-/**
- * 通过 Docker Stats API 采集内存使用
- */
-public long collectMemoryUsage(String containerId) {
-    try {
-        // 使用 docker stats --no-stream 获取单次统计
-        Statistics stats = dockerClient.statsCmd(containerId)
-                .withNoStream(true)
-                .exec(new InvocationBuilder.AsyncResultCallback<Statistics>())
-                .awaitResult(5, TimeUnit.SECONDS);
-        
-        if (stats != null && stats.getMemoryStats() != null) {
-            // 返回实际使用的内存（不含缓存）
-            Long usage = stats.getMemoryStats().getUsage();
-            Long cache = stats.getMemoryStats().getStats().getCache();
-            return usage - (cache != null ? cache : 0);
-        }
-        return 0;
-    } catch (Exception e) {
-        log.warn("获取内存统计失败: {}", e.getMessage());
-        return 0;
-    }
+// 编译（池化模式）
+private CommandResult compileInTaskDir(String containerId, LanguageStrategy strategy, String taskDir) {
+    String source = taskDir + "/" + strategy.getSourceFileName();
+    String output = taskDir + "/" + strategy.getExecutableFileName();
+    String[] compileCmd = strategy.getCompileCommand(source, output);
+    return executeCommandInDir(containerId, compileCmd, null,
+            strategy.getCompileTimeout() * 1000L, taskDir);
+}
+
+// 运行（池化模式）
+private ExecutionResult runCodeInTaskDir(String containerId, LanguageStrategy strategy,
+                                          String taskDir, String input,
+                                          int index, int timeLimit, int memoryLimit) {
+    CommandResult result = executeCommandInDir(containerId,
+            strategy.getRunCommand(taskDir + "/" + strategy.getExecutableFileName()),
+            input, timeLimit, taskDir);
+    // 将 CommandResult 映射为 ExecutionResult（SUCCESS/TIMEOUT/MLE/RE/OLE）
+}
+```
+
+### 5.5 文件写入
+
+源代码通过 tar 归档方式写入容器：
+
+```java
+private void writeSourceCodeToContainer(String containerId, String taskDir,
+                                         String fileName, String code) {
+    ensureTaskDirExists(containerId, taskDir);  // mkdir -p
+    // 创建 tar 归档 → copyArchiveToContainerCmd
+    dockerClient.copyArchiveToContainerCmd(containerId)
+            .withTarInputStream(tarStream)
+            .withRemotePath(taskDir)
+            .exec();
 }
 ```
 
 ---
 
-## 7. 下一步
+## 6. 执行模式
 
-下一篇文档将详细介绍 **多语言支持配置**，包括：
-- 语言策略模式设计
-- 各语言的编译和执行命令
-- Docker 镜像配置
-- 语言特定的安全限制
+### 6.1 容器池模式（默认）
 
-详见 [04-LANGUAGE-SUPPORT.md](04-LANGUAGE-SUPPORT.md)
+```
+1. 从容器池获取容器 (acquireContainer)
+2. 创建任务目录 (mkdir -p /sandbox/workspace/job-{requestId})
+3. 写入源代码 (tar copy)
+4. 编译（如需编译）
+5. 逐个运行测试用例
+6. 清理任务目录 (rm -rf)
+7. 归还容器到池 (releaseContainer)
+```
+
+### 6.2 传统模式（pool.enabled=false）
+
+```
+1. 创建宿主工作目录写入源代码
+2. 创建容器（挂载工作目录）
+3. 启动容器
+4. 编译 + 运行
+5. 停止并删除容器
+6. 清理宿主工作目录
+```
+
+---
+
+## 7. CommandResult
+
+```java
+@Data
+@Builder
+public class CommandResult {
+    private boolean success;
+    private int exitCode;
+    private String stdout;
+    private String stderr;
+    private long executionTime;      // 毫秒
+    private long memoryUsage;        // KB
+    private boolean timeout;
+    private boolean memoryExceeded;
+    private boolean outputExceeded;
+    private String errorMessage;
+
+    public static CommandResult success(String stdout, String stderr, long time, long mem);
+    public static CommandResult failure(int exitCode, String stdout, String stderr, long time, long mem);
+    public static CommandResult timeout(long timeLimit);
+    public static CommandResult memoryExceeded(long memoryUsage);
+    public static CommandResult error(String message);
+}
+```
