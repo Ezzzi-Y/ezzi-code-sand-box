@@ -26,7 +26,7 @@ import java.util.UUID;
 /**
  * 代码执行服务
  * <p>
- * 核心业务服务，负责代码执行，不涉及判题逻辑
+ * 核心业务服务，负责代码执行，不涉及结果评判逻辑
  * </p>
  *
  * @author ezzziy
@@ -231,7 +231,10 @@ public class ExecutionServiceImpl implements ExecutionService {
             throw new IllegalArgumentException("批量执行必须提供 inputDataUrl（zip 文件 URL）");
         }
 
-        InputDataSet inputDataSet = inputDataService.getInputDataSet(request.getInputDataUrl());
+        InputDataSet inputDataSet = inputDataService.getInputDataSet(
+                request.getInputDataUrl(),
+                request.getInputDataHeadUrl()
+        );
         return inputDataSet.getInputs() == null ? new ArrayList<>() : inputDataSet.getInputs();
     }
 

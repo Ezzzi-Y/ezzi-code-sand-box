@@ -62,6 +62,15 @@ public class ExecuteRequest {
      */
     private String inputDataUrl;
 
+    /**
+     * 预签名 HEAD URL，用于高效探测远端元数据（ETag / Last-Modified）。
+     * <p>
+     * 可选字段。提供后将使用 HEAD 请求探测版本，缓存命中时不下载 ZIP 内容。
+     * 缺省时回退为 GET 统一获取。
+     * </p>
+     */
+    private String inputDataHeadUrl;
+
     // ==================== 资源限制 ====================
 
     /**

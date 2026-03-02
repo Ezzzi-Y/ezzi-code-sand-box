@@ -1,7 +1,7 @@
 <div align="center">
   <h1>🛡️ Ezzi Code Sandbox</h1>
   <p>
-    <strong>为在线评测系统 (OJ) 设计的安全、高效、可扩展的 Docker 代码执行沙箱</strong>
+    <strong>独立、安全、高效、可扩展的 Docker 代码执行沙箱服务</strong>
   </p>
 
   <p>
@@ -23,7 +23,7 @@
 
 ## 📖 项目简介
 
-**Ezzi Code Sandbox** 是一个专为在线评测系统 (Online Judge) 打造的高性能、安全的代码执行服务。本项目基于 Spring Boot 和 Docker 构建，旨在为多种编程语言提供安全、隔离的编译和运行环境。
+**Ezzi Code Sandbox** 是一个独立的高性能、安全代码执行服务。本项目基于 Spring Boot 和 Docker 构建，旨在为多种编程语言提供安全、隔离的编译和运行环境，可被在线评测平台、教学平台、代码练习平台等上游系统调用。
 
 与传统的进程级沙箱不同，本项目利用 **Docker-in-Docker (Socket 挂载)** 技术实现了更强的隔离性，同时保持了接近原生的执行性能。它能够自动管理容器生命周期，严格控制资源使用（CPU、内存、时间），并实施主要的安全策略。
 

@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * 输入数据服务
  * <p>
  * 从预签名 URL 下载 ZIP 输入数据包并解压，按 ObjectKey 在本地磁盘缓存。
- * 每次请求通过 GET 获取远端响应头中的 ETag/Last-Modified，比对后决定是否复用缓存。
+ * 支持双 URL 模式：HEAD 探测元数据 + GET 按需下载；也兼容仅 GET 的回退模式。
  * </p>
  *
  * @author ezzziy
@@ -56,45 +56,126 @@ public class InputDataServiceImpl implements InputDataService {
     // ==================== 公有方法 ====================
 
     /**
-     * 从预签名 URL 获取输入数据集
+     * 从预签名 URL 获取输入数据集（双 URL 模式）
      * <p>
-     * 1. 提取 ObjectKey，定位本地缓存目录
-     * 2. GET 请求获取远端元数据（ETag/Last-Modified）与 ZIP 内容
-     * 3. 版本一致 → 从磁盘加载；不一致 → 重新下载
+     * 路径 A（有 HEAD URL）：HEAD 探测元数据 → 缓存命中则直接返回，未命中则 GET 下载<br/>
+     * 路径 B（无 HEAD URL）：GET 统一获取元数据和 ZIP 内容（回退模式）
      * </p>
      */
     @Override
-    public InputDataSet getInputDataSet(String presignedUrl) {
-        String objectKey = OssUrlParser.extractObjectKey(presignedUrl);
+    public InputDataSet getInputDataSet(String presignedGetUrl, String presignedHeadUrl) {
+        String objectKey = OssUrlParser.extractObjectKey(presignedGetUrl);
         log.debug("从 URL 提取 ObjectKey: {}", objectKey);
 
-        RemoteFetchResult remoteFetch = fetchRemoteObject(presignedUrl);
+        boolean hasHeadUrl = presignedHeadUrl != null && !presignedHeadUrl.isBlank();
+        Path localDir = getLocalStoragePath(objectKey);
+
+        // ─── 路径 A：有 HEAD URL，走高效探测 ───
+        if (hasHeadUrl) {
+            RemoteObjectMeta remoteMeta = fetchRemoteMeta(presignedHeadUrl);
+
+            if (Files.exists(localDir)) {
+                RemoteObjectMeta localMeta = readLocalMeta(localDir);
+                if (isSameVersion(localMeta, remoteMeta)) {
+                    log.info("HEAD 探测版本未变化，复用本地缓存: objectKey={}, etag={}, lastModified={}",
+                            objectKey, remoteMeta.etag(), remoteMeta.lastModified());
+                    return loadFromLocalDisk(objectKey, localDir);
+                }
+                log.info("HEAD 探测版本已变化，准备重新拉取: objectKey={}, localEtag={}, remoteEtag={}",
+                        objectKey,
+                        localMeta != null ? localMeta.etag() : null,
+                        remoteMeta.etag());
+                deleteDirectory(localDir);
+            }
+
+            // 缓存未命中，发起 GET 下载
+            log.info("开始下载输入数据: objectKey={}", objectKey);
+            byte[] zipBytes = downloadZip(presignedGetUrl);
+            return downloadAndSaveToDisk(objectKey, zipBytes, remoteMeta);
+        }
+
+        // ─── 路径 B：无 HEAD URL，回退到 GET 统一获取 ───
+        RemoteFetchResult remoteFetch = fetchRemoteObject(presignedGetUrl);
         RemoteObjectMeta remoteMeta = remoteFetch.meta();
 
-        Path localDir = getLocalStoragePath(objectKey);
         if (Files.exists(localDir)) {
             RemoteObjectMeta localMeta = readLocalMeta(localDir);
             if (isSameVersion(localMeta, remoteMeta)) {
-                log.info("远端版本未变化，复用本地缓存: objectKey={}, method=GET, etag={}, lastModified={}",
+                log.info("GET 探测版本未变化，复用本地缓存（回退模式）: objectKey={}, etag={}, lastModified={}",
                         objectKey, remoteMeta.etag(), remoteMeta.lastModified());
                 return loadFromLocalDisk(objectKey, localDir);
             }
-
-            log.info("远端版本已变化，准备重新拉取: objectKey={}, method=GET, localEtag={}, remoteEtag={}",
+            log.info("GET 探测版本已变化，准备重新拉取: objectKey={}, localEtag={}, remoteEtag={}",
                     objectKey,
                     localMeta != null ? localMeta.etag() : null,
                     remoteMeta.etag());
             deleteDirectory(localDir);
         }
 
-        log.info("开始下载输入数据: objectKey={}", objectKey);
+        log.info("开始使用已获取的 ZIP 内容落盘: objectKey={}", objectKey);
         return downloadAndSaveToDisk(objectKey, remoteFetch.zipBytes(), remoteMeta);
     }
 
-    // ==================== 远端元数据 ====================
+    // ==================== 远端数据获取 ====================
 
     /**
-     * 对预签名 URL 发起 GET 请求，获取 ZIP 内容及 ETag/Last-Modified
+     * 通过 HEAD 请求获取远端对象元数据（ETag / Last-Modified）
+     * <p>
+     * 不下载内容，仅获取响应头。用于高效探测版本变化。
+     * </p>
+     */
+    private RemoteObjectMeta fetchRemoteMeta(String presignedHeadUrl) {
+        try {
+            try (HttpResponse response = HttpRequest.head(presignedHeadUrl)
+                    .timeout(downloadTimeout)
+                    .execute()) {
+                int statusCode = response.getStatus();
+                if (statusCode == HttpStatus.HTTP_OK) {
+                    String etag = trimHeader(response.header("ETag"));
+                    String lastModified = trimHeader(response.header("Last-Modified"));
+                    return new RemoteObjectMeta(etag, lastModified);
+                }
+                if (statusCode == HttpStatus.HTTP_NOT_FOUND) {
+                    throw new RuntimeException("远端对象不存在: HEAD " + presignedHeadUrl);
+                }
+                throw new RuntimeException("HEAD 探测远端对象失败，HTTP 状态码: " + statusCode);
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("HEAD 获取远端元数据失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 通过 GET 请求仅下载 ZIP 内容（不关心元数据）
+     * <p>
+     * 在 HEAD 探测确认缓存未命中后调用，单独获取 ZIP body。
+     * </p>
+     */
+    private byte[] downloadZip(String presignedGetUrl) {
+        try {
+            try (HttpResponse response = HttpRequest.get(presignedGetUrl)
+                    .timeout(downloadTimeout)
+                    .execute()) {
+                int statusCode = response.getStatus();
+                if (statusCode == HttpStatus.HTTP_OK) {
+                    return response.bodyBytes();
+                }
+                if (statusCode == HttpStatus.HTTP_NOT_FOUND) {
+                    throw new RuntimeException("远端对象不存在: GET " + presignedGetUrl);
+                }
+                throw new RuntimeException("下载远端对象失败，HTTP 状态码: " + statusCode);
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("下载远端对象失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 对预签名 URL 发起 GET 请求，同时获取 ZIP 内容及 ETag/Last-Modified（回退模式）
      */
     private RemoteFetchResult fetchRemoteObject(String presignedUrl) {
         try {

@@ -30,10 +30,19 @@ public class BatchExecuteRequest {
     private String language;
 
     /**
-     * 预签名 URL（ZIP，按 1.in / 2.in ...）
+     * 预签名 GET URL（ZIP，按 1.in / 2.in ...），用于下载 ZIP 输入数据包
      */
     @NotBlank(message = "inputDataUrl 不能为空，且必须是 zip 文件 URL")
     private String inputDataUrl;
+
+    /**
+     * 预签名 HEAD URL，用于高效探测远端元数据（ETag / Last-Modified）。
+     * <p>
+     * 可选字段。提供后将使用 HEAD 请求探测版本，缓存命中时不下载 ZIP 内容。
+     * 缺省时回退为 GET 统一获取（与旧版本行为一致）。
+     * </p>
+     */
+    private String inputDataHeadUrl;
 
     /**
      * 时间限制（毫秒）

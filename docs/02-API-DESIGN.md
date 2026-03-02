@@ -1,4 +1,4 @@
-# OJ 代码执行沙箱服务 - API 设计与数据模型
+# 代码执行沙箱服务 - API 设计与数据模型
 
 ## 1. API 概览
 
@@ -118,7 +118,8 @@ Content-Type: application/json
   "requestId": "batch-001",
   "language": "java17",
   "code": "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int a = sc.nextInt();\n        int b = sc.nextInt();\n        System.out.println(a + b);\n    }\n}",
-  "inputDataUrl": "https://example.com/questions/1001/inputs.zip?signature=xxx",
+  "inputDataUrl": "https://oss.example.com/data/1001.zip?sign=GET_SIGN",
+  "inputDataHeadUrl": "https://oss.example.com/data/1001.zip?sign=HEAD_SIGN",
   "timeLimit": 2000,
   "memoryLimit": 256
 }
@@ -131,7 +132,8 @@ Content-Type: application/json
 | `requestId` | String | ❌ | 请求标识 |
 | `language` | String | ✅ | 编程语言 |
 | `code` | String | ✅ | 用户源代码（最大 64KB） |
-| `inputDataUrl` | String | ✅ | 预签名 URL，指向 zip 输入数据包 |
+| `inputDataUrl` | String | ✅ | 预签名 GET URL，用于下载 zip 输入数据包 |
+| `inputDataHeadUrl` | String | ❌ | 预签名 HEAD URL，用于高效探测元数据。缺省时回退为 GET 统一获取 |
 | `timeLimit` | Integer | ❌ | 每个用例的时间限制（毫秒） |
 | `memoryLimit` | Integer | ❌ | 内存限制（MB） |
 
@@ -203,9 +205,10 @@ Content-Type: application/json
 
 ### 2.3 输入数据缓存（批量 URL 模式）
 
-- 批量执行使用 `inputDataUrl` 时，服务发起 GET 请求下载 ZIP。
-- 从 GET 响应头提取 `ETag` / `Last-Modified` 与本地缓存元数据比对。
-- 一致则使用本地缓存（忽略本次下载体），不一致则解压落盘并更新元数据。
+- 支持双 URL 模式：`inputDataHeadUrl`（HEAD 探测）+ `inputDataUrl`（GET 下载）。
+- 当提供 `inputDataHeadUrl` 时，使用 HEAD 请求探测 `ETag` / `Last-Modified`，缓存命中时不下载 ZIP，零带宽开销。
+- 当未提供 `inputDataHeadUrl` 时，回退为 GET 统一获取（与旧版本行为一致）。
+- 版本一致则使用本地缓存，不一致则解压落盘并更新元数据。
 - 本地缓存目录由 `ObjectKey` 决定，目录中保存 `*.in` 文件与 `_meta.properties`。
 - 当前版本无独立缓存管理 API（无 `/cache/*` 路由）。
 
@@ -372,6 +375,9 @@ public class BatchExecuteRequest {
 
     @NotBlank(message = "inputDataUrl 不能为空，且必须是 zip 文件 URL")
     private String inputDataUrl;
+
+    /** 预签名 HEAD URL，用于高效探测远端元数据。可选，缺省时回退为 GET 统一获取。 */
+    private String inputDataHeadUrl;
 
     private Integer timeLimit;
     private Integer memoryLimit;

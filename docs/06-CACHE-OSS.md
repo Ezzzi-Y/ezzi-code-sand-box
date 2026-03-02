@@ -1,4 +1,4 @@
-# OJ 代码执行沙箱服务 - 输入数据缓存体系（当前实现）
+# 代码执行沙箱服务 - 输入数据缓存体系（当前实现）
 
 ## 1. 文档范围
 
@@ -22,9 +22,9 @@
 
 ### 2.2 核心原则
 
-- **远端访问使用完整预签名 URL 发起 GET 请求**（一次请求同时获取元数据和 ZIP 内容）
+- **双 URL 模式**：若提供 `inputDataHeadUrl`，使用 HEAD 探测元数据 + GET 按需下载；否则回退为 GET 统一获取
 - **ObjectKey 仅用于本地缓存定位**，不用于拼接远端无签名 URL
-- 批量执行接口仅支持 `inputDataUrl`（zip 预签名 URL）模式
+- 批量执行接口支持 `inputDataUrl`（GET 预签名 URL）+ 可选的 `inputDataHeadUrl`（HEAD 预签名 URL）
 
 ---
 
@@ -34,12 +34,20 @@
 
 1. `POST /execute/batch`
 2. `ExecutionServiceImpl.resolveBatchInputs(...)`
-3. `InputDataServiceImpl.getInputDataSet(presignedUrl)`
+3. `InputDataServiceImpl.getInputDataSet(presignedGetUrl, presignedHeadUrl)`
 
-### 3.2 处理流程
+### 3.2 处理流程（双 URL 模式，提供 `inputDataHeadUrl`）
 
-1. 解析预签名 URL，提取 `ObjectKey`（用于缓存目录）
-2. 使用预签名 URL 发起 `GET` 请求，同时获取远端元数据（`ETag`/`Last-Modified`）和 ZIP 内容
+1. 解析预签名 GET URL，提取 `ObjectKey`（用于缓存目录）
+2. 使用预签名 HEAD URL 发起 `HEAD` 请求，获取远端元数据（`ETag`/`Last-Modified`）
+3. 读取本地 `_meta.properties` 比对版本
+4. 若一致：直接读取本地 `*.in` 文件（**零下载开销**）
+5. 若不一致或无缓存：使用预签名 GET URL 发起 `GET` 请求下载 ZIP，解压并写入元数据
+
+### 3.3 处理流程（回退模式，未提供 `inputDataHeadUrl`）
+
+1. 解析预签名 GET URL，提取 `ObjectKey`（用于缓存目录）
+2. 使用预签名 GET URL 发起 `GET` 请求，同时获取远端元数据和 ZIP 内容
 3. 读取本地 `_meta.properties` 比对版本
 4. 若一致：丢弃本次 GET 的 ZIP 内容，直接读取本地 `*.in` 文件
 5. 若不一致或无缓存：使用本次 GET 的 ZIP 内容解压并写入元数据
@@ -50,6 +58,19 @@
 
 ### 4.1 远端数据获取
 
+#### 路径 A：HEAD 探测（双 URL 模式）
+
+`fetchRemoteMeta(String presignedHeadUrl)` 使用：
+
+- `cn.hutool.http.HttpRequest.head()`
+- `HEAD presignedHeadUrl`（仅获取响应头，不下载内容）
+- 超时配置：`sandbox.input-data.download-timeout`
+- 返回 `RemoteObjectMeta(etag, lastModified)`
+
+缓存未命中时，`downloadZip(String presignedGetUrl)` 使用 `GET` 单独下载 ZIP body。
+
+#### 路径 B：GET 统一获取（回退模式）
+
 `fetchRemoteObject(String presignedUrl)` 使用：
 
 - `cn.hutool.http.HttpRequest.get()`
@@ -57,11 +78,11 @@
 - 超时配置：`sandbox.input-data.download-timeout`
 - 返回 `RemoteFetchResult(byte[] zipBytes, RemoteObjectMeta meta)`
 
-状态码处理：
+#### 状态码处理（两种路径通用）
 
-- `200`：读取响应头 `ETag` 和 `Last-Modified`，同时获取响应体（ZIP 字节）
+- `200`：读取响应头 `ETag` 和 `Last-Modified`
 - `404`：抛出"远端对象不存在"异常
-- 其他状态码：抛出"查询远端对象失败"异常
+- 其他状态码：抛出对应失败异常
 
 ### 4.2 本地元数据文件
 

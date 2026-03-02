@@ -322,7 +322,7 @@ public interface InputDataService {
 | `BatchExecuteRequest.isUrlInput()` 始终返回 `true` | 属于请求模型，不在缓存体系范围 |
 | `ExecutionServiceImpl` 格式/缩进问题 | 属于执行服务，可单独重构 |
 | 文档 `07-CORE-IMPLEMENTATION.md` 中残留的 `CacheService` 代码片段 | 已有历史说明标注，后续独立清理 |
-| 并发安全（同一 ObjectKey 并行请求可能重复下载） | 当前判题场景下并发度极低，暂不需要加锁 |
+| 并发安全（同一 ObjectKey 并行请求可能重复下载） | 当前业务场景下并发度较低，暂不需要加锁 |
 
 ---
 

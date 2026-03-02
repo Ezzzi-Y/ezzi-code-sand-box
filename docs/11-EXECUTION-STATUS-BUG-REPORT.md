@@ -285,7 +285,7 @@ private ExecutionResult runCodeInTaskDir(...) {
 
 `executeCommandInDir` 已经从容器输出中解析了纳秒级精确时间存储在 `result.getExecutionTime()` 中，但 `runCodeInTaskDir` 和 `runCode` 都忽略了这个值，改用 Java 层面的 `System.currentTimeMillis()` 差值。
 
-Java 层面时间包含了 Docker API 通信开销、命令序列化/反序列化等额外耗时，对于有严格时间限制的判题场景可能导致时间偏大。
+Java 层面时间包含了 Docker API 通信开销、命令序列化/反序列化等额外耗时，在有严格时间限制的执行场景中可能导致时间偏大。
 
 ---
 

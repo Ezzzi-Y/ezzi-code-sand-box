@@ -6,7 +6,7 @@ import lombok.Getter;
 /**
  * 代码执行状态枚举
  * <p>
- * 仅表示执行状态，不涉及判题逻辑
+ * 仅表示执行状态，不涉及结果评判逻辑
  * </p>
  *
  * @author ezzziy
