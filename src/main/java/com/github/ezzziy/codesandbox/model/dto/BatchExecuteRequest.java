@@ -36,13 +36,13 @@ public class BatchExecuteRequest {
     private String inputDataUrl;
 
     /**
-     * 预签名 HEAD URL，用于高效探测远端元数据（ETag / Last-Modified）。
+     * 输入数据版本号（如 sha256 摘要），用于本地缓存比对。
      * <p>
-     * 可选字段。提供后将使用 HEAD 请求探测版本，缓存命中时不下载 ZIP 内容。
-     * 缺省时回退为 GET 统一获取（与旧版本行为一致）。
+     * 可选字段。提供后沙箱直接做版本字符串比对，缓存命中时零下载开销。
+     * 缺省时回退为 GET 统一获取（从响应头读取 ETag 做版本比对）。
      * </p>
      */
-    private String inputDataHeadUrl;
+    private String inputDataVersion;
 
     /**
      * 时间限制（毫秒）

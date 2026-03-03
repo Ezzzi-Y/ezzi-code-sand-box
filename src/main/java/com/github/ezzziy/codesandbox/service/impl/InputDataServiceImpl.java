@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * 输入数据服务
  * <p>
  * 从预签名 URL 下载 ZIP 输入数据包并解压，按 ObjectKey 在本地磁盘缓存。
- * 支持双 URL 模式：HEAD 探测元数据 + GET 按需下载；也兼容仅 GET 的回退模式。
+ * 支持版本号驱动模式（由调用方携带版本号，零网络探测）；也兼容仅 GET 的回退模式。
  * </p>
  *
  * @author ezzziy
@@ -56,104 +56,69 @@ public class InputDataServiceImpl implements InputDataService {
     // ==================== 公有方法 ====================
 
     /**
-     * 从预签名 URL 获取输入数据集（双 URL 模式）
+     * 从预签名 URL 获取输入数据集
      * <p>
-     * 路径 A（有 HEAD URL）：HEAD 探测元数据 → 缓存命中则直接返回，未命中则 GET 下载<br/>
-     * 路径 B（无 HEAD URL）：GET 统一获取元数据和 ZIP 内容（回退模式）
+     * 路径 A（有 inputDataVersion）：纯本地版本字符串比对，缓存命中时零网络请求<br/>
+     * 路径 B（无 inputDataVersion）：GET 统一获取元数据和 ZIP 内容（回退模式，从响应头读 ETag）
      * </p>
      */
     @Override
-    public InputDataSet getInputDataSet(String presignedGetUrl, String presignedHeadUrl) {
+    public InputDataSet getInputDataSet(String presignedGetUrl, String inputDataVersion) {
         String objectKey = OssUrlParser.extractObjectKey(presignedGetUrl);
         log.debug("从 URL 提取 ObjectKey: {}", objectKey);
 
-        boolean hasHeadUrl = presignedHeadUrl != null && !presignedHeadUrl.isBlank();
+        boolean hasVersion = inputDataVersion != null && !inputDataVersion.isBlank();
         Path localDir = getLocalStoragePath(objectKey);
 
-        // ─── 路径 A：有 HEAD URL，走高效探测 ───
-        if (hasHeadUrl) {
-            RemoteObjectMeta remoteMeta = fetchRemoteMeta(presignedHeadUrl);
-
+        // ─── 路径 A：有版本号，走高效版本比对（零网络请求） ───
+        if (hasVersion) {
             if (Files.exists(localDir)) {
-                RemoteObjectMeta localMeta = readLocalMeta(localDir);
-                if (isSameVersion(localMeta, remoteMeta)) {
-                    log.info("HEAD 探测版本未变化，复用本地缓存: objectKey={}, etag={}, lastModified={}",
-                            objectKey, remoteMeta.etag(), remoteMeta.lastModified());
+                String localVersion = readLocalVersion(localDir);
+                if (inputDataVersion.equals(localVersion)) {
+                    log.info("版本号一致，复用本地缓存: objectKey={}, version={}",
+                            objectKey, inputDataVersion);
                     return loadFromLocalDisk(objectKey, localDir);
                 }
-                log.info("HEAD 探测版本已变化，准备重新拉取: objectKey={}, localEtag={}, remoteEtag={}",
-                        objectKey,
-                        localMeta != null ? localMeta.etag() : null,
-                        remoteMeta.etag());
+                log.info("版本号不一致，准备重新下载: objectKey={}, localVersion={}, remoteVersion={}",
+                        objectKey, localVersion, inputDataVersion);
                 deleteDirectory(localDir);
             }
 
             // 缓存未命中，发起 GET 下载
             log.info("开始下载输入数据: objectKey={}", objectKey);
-            byte[] zipBytes = downloadZip(presignedGetUrl);
-            return downloadAndSaveToDisk(objectKey, zipBytes, remoteMeta);
+            byte[] zipBytes = downloadZipOnly(presignedGetUrl);
+            return saveToDiskAndReturn(objectKey, zipBytes, inputDataVersion);
         }
 
-        // ─── 路径 B：无 HEAD URL，回退到 GET 统一获取 ───
+        // ─── 路径 B：无版本号，回退到 GET 统一获取（从响应头读 ETag） ───
         RemoteFetchResult remoteFetch = fetchRemoteObject(presignedGetUrl);
-        RemoteObjectMeta remoteMeta = remoteFetch.meta();
+        String effectiveVersion = deriveVersionFromMeta(remoteFetch.meta());
 
         if (Files.exists(localDir)) {
-            RemoteObjectMeta localMeta = readLocalMeta(localDir);
-            if (isSameVersion(localMeta, remoteMeta)) {
-                log.info("GET 探测版本未变化，复用本地缓存（回退模式）: objectKey={}, etag={}, lastModified={}",
-                        objectKey, remoteMeta.etag(), remoteMeta.lastModified());
+            String localVersion = readLocalVersion(localDir);
+            if (effectiveVersion != null && effectiveVersion.equals(localVersion)) {
+                log.info("GET 响应头版本一致，复用本地缓存（回退模式）: objectKey={}, version={}",
+                        objectKey, effectiveVersion);
                 return loadFromLocalDisk(objectKey, localDir);
             }
-            log.info("GET 探测版本已变化，准备重新拉取: objectKey={}, localEtag={}, remoteEtag={}",
-                    objectKey,
-                    localMeta != null ? localMeta.etag() : null,
-                    remoteMeta.etag());
+            log.info("GET 响应头版本不一致，准备重新落盘: objectKey={}, localVersion={}, remoteVersion={}",
+                    objectKey, localVersion, effectiveVersion);
             deleteDirectory(localDir);
         }
 
         log.info("开始使用已获取的 ZIP 内容落盘: objectKey={}", objectKey);
-        return downloadAndSaveToDisk(objectKey, remoteFetch.zipBytes(), remoteMeta);
+        return saveToDiskAndReturn(objectKey, remoteFetch.zipBytes(), effectiveVersion);
     }
 
     // ==================== 远端数据获取 ====================
 
     /**
-     * 通过 HEAD 请求获取远端对象元数据（ETag / Last-Modified）
+     * 通过 GET 请求仅下载 ZIP 内容
      * <p>
-     * 不下载内容，仅获取响应头。用于高效探测版本变化。
+     * 在版本号驱动模式下，缓存未命中时调用，单独获取 ZIP body。
      * </p>
      */
-    private RemoteObjectMeta fetchRemoteMeta(String presignedHeadUrl) {
-        try {
-            try (HttpResponse response = HttpRequest.head(presignedHeadUrl)
-                    .timeout(downloadTimeout)
-                    .execute()) {
-                int statusCode = response.getStatus();
-                if (statusCode == HttpStatus.HTTP_OK) {
-                    String etag = trimHeader(response.header("ETag"));
-                    String lastModified = trimHeader(response.header("Last-Modified"));
-                    return new RemoteObjectMeta(etag, lastModified);
-                }
-                if (statusCode == HttpStatus.HTTP_NOT_FOUND) {
-                    throw new RuntimeException("远端对象不存在: HEAD " + presignedHeadUrl);
-                }
-                throw new RuntimeException("HEAD 探测远端对象失败，HTTP 状态码: " + statusCode);
-            }
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("HEAD 获取远端元数据失败: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * 通过 GET 请求仅下载 ZIP 内容（不关心元数据）
-     * <p>
-     * 在 HEAD 探测确认缓存未命中后调用，单独获取 ZIP body。
-     * </p>
-     */
-    private byte[] downloadZip(String presignedGetUrl) {
+    private byte[] downloadZipOnly(String presignedGetUrl) {
         try {
             try (HttpResponse response = HttpRequest.get(presignedGetUrl)
                     .timeout(downloadTimeout)
@@ -202,22 +167,15 @@ public class InputDataServiceImpl implements InputDataService {
     }
 
     /**
-     * 比较本地与远端元数据版本是否一致
+     * 从远端元数据中推导版本字符串（回退模式用）
      * <p>
-     * 优先比较 ETag，ETag 缺失时比较 Last-Modified，两者都不可用则视为不一致。
+     * 优先使用 ETag，其次 Last-Modified。
      * </p>
      */
-    private boolean isSameVersion(RemoteObjectMeta localMeta, RemoteObjectMeta remoteMeta) {
-        if (localMeta == null || remoteMeta == null) {
-            return false;
-        }
-        if (localMeta.etag() != null && remoteMeta.etag() != null) {
-            return Objects.equals(localMeta.etag(), remoteMeta.etag());
-        }
-        if (localMeta.lastModified() != null && remoteMeta.lastModified() != null) {
-            return Objects.equals(localMeta.lastModified(), remoteMeta.lastModified());
-        }
-        return false;
+    private String deriveVersionFromMeta(RemoteObjectMeta meta) {
+        if (meta == null) return null;
+        if (meta.etag() != null) return meta.etag();
+        return meta.lastModified();
     }
 
     // ==================== 下载与解压 ====================
@@ -228,7 +186,7 @@ public class InputDataServiceImpl implements InputDataService {
      * 如果解压过程中失败，会清理已创建的目录，避免残留无效缓存。
      * </p>
      */
-    private InputDataSet downloadAndSaveToDisk(String objectKey, byte[] zipBytes, RemoteObjectMeta remoteMeta) {
+    private InputDataSet saveToDiskAndReturn(String objectKey, byte[] zipBytes, String version) {
         Path localDir = getLocalStoragePath(objectKey);
         try {
             if (zipBytes == null || zipBytes.length == 0) {
@@ -250,11 +208,11 @@ public class InputDataServiceImpl implements InputDataService {
             }
 
             setPermissions(localDir);
-            writeLocalMeta(localDir, remoteMeta);
+            writeLocalVersion(localDir, version);
 
             List<String> inputs = new ArrayList<>(inputMap.values());
-            log.info("输入数据已下载到本地: objectKey={}, path={}, count={}",
-                    objectKey, localDir, inputs.size());
+            log.info("输入数据已下载到本地: objectKey={}, path={}, count={}, version={}",
+                    objectKey, localDir, inputs.size(), version);
 
             return InputDataSet.builder()
                     .dataId(objectKey)
@@ -359,17 +317,15 @@ public class InputDataServiceImpl implements InputDataService {
 
     // ==================== 本地元数据（_meta.properties） ====================
 
-    private void writeLocalMeta(Path localDir, RemoteObjectMeta remoteMeta) {
-        if (remoteMeta == null) {
+    /**
+     * 写入版本信息到本地元数据文件
+     */
+    private void writeLocalVersion(Path localDir, String version) {
+        if (version == null) {
             return;
         }
         Properties properties = new Properties();
-        if (remoteMeta.etag() != null) {
-            properties.setProperty("etag", remoteMeta.etag());
-        }
-        if (remoteMeta.lastModified() != null) {
-            properties.setProperty("lastModified", remoteMeta.lastModified());
-        }
+        properties.setProperty("version", version);
         properties.setProperty("updatedAt", String.valueOf(System.currentTimeMillis()));
 
         Path metaFile = localDir.resolve(META_FILE_NAME);
@@ -380,7 +336,13 @@ public class InputDataServiceImpl implements InputDataService {
         }
     }
 
-    private RemoteObjectMeta readLocalMeta(Path localDir) {
+    /**
+     * 读取本地缓存的版本号
+     * <p>
+     * 优先读取 {@code version} 字段，读不到时兼容旧格式回退读 {@code etag}。
+     * </p>
+     */
+    private String readLocalVersion(Path localDir) {
         Path metaFile = localDir.resolve(META_FILE_NAME);
         if (!Files.exists(metaFile)) {
             return null;
@@ -388,10 +350,12 @@ public class InputDataServiceImpl implements InputDataService {
         Properties properties = new Properties();
         try (BufferedReader reader = Files.newBufferedReader(metaFile, StandardCharsets.UTF_8)) {
             properties.load(reader);
-            return new RemoteObjectMeta(
-                    trimHeader(properties.getProperty("etag")),
-                    trimHeader(properties.getProperty("lastModified"))
-            );
+            // 优先读 version，兼容旧格式回退读 etag
+            String version = properties.getProperty("version");
+            if (version == null) {
+                version = properties.getProperty("etag");
+            }
+            return trimHeader(version);
         } catch (IOException e) {
             log.warn("读取本地元数据失败: {}", metaFile, e);
             return null;
@@ -466,9 +430,11 @@ public class InputDataServiceImpl implements InputDataService {
 
     // ==================== 内部类型 ====================
 
+    /** GET 回退模式内部使用：携带 ZIP 内容和响应头元数据 */
     private record RemoteFetchResult(byte[] zipBytes, RemoteObjectMeta meta) {
     }
 
+    /** GET 回退模式内部使用：从响应头提取的 ETag / Last-Modified */
     private record RemoteObjectMeta(String etag, String lastModified) {
     }
 }

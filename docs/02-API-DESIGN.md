@@ -119,7 +119,7 @@ Content-Type: application/json
   "language": "java17",
   "code": "import java.util.*;\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int a = sc.nextInt();\n        int b = sc.nextInt();\n        System.out.println(a + b);\n    }\n}",
   "inputDataUrl": "https://oss.example.com/data/1001.zip?sign=GET_SIGN",
-  "inputDataHeadUrl": "https://oss.example.com/data/1001.zip?sign=HEAD_SIGN",
+  "inputDataVersion": "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890",
   "timeLimit": 2000,
   "memoryLimit": 256
 }
@@ -133,7 +133,7 @@ Content-Type: application/json
 | `language` | String | ✅ | 编程语言 |
 | `code` | String | ✅ | 用户源代码（最大 64KB） |
 | `inputDataUrl` | String | ✅ | 预签名 GET URL，用于下载 zip 输入数据包 |
-| `inputDataHeadUrl` | String | ❌ | 预签名 HEAD URL，用于高效探测元数据。缺省时回退为 GET 统一获取 |
+| `inputDataVersion` | String | ❌ | 输入数据版本号（推荐 sha256），用于本地缓存比对。缺省时回退为 GET 统一获取 |
 | `timeLimit` | Integer | ❌ | 每个用例的时间限制（毫秒） |
 | `memoryLimit` | Integer | ❌ | 内存限制（MB） |
 
@@ -205,9 +205,9 @@ Content-Type: application/json
 
 ### 2.3 输入数据缓存（批量 URL 模式）
 
-- 支持双 URL 模式：`inputDataHeadUrl`（HEAD 探测）+ `inputDataUrl`（GET 下载）。
-- 当提供 `inputDataHeadUrl` 时，使用 HEAD 请求探测 `ETag` / `Last-Modified`，缓存命中时不下载 ZIP，零带宽开销。
-- 当未提供 `inputDataHeadUrl` 时，回退为 GET 统一获取（与旧版本行为一致）。
+- 支持版本号驱动模式：调用方在请求中传入 `inputDataVersion`（推荐 sha256），沙箱做字符串精确比对。
+- 当提供 `inputDataVersion` 时，缓存命中时**零网络请求**（纯本地比对），显著优于 HEAD 探测或 GET 全量下载。
+- 当未提供 `inputDataVersion` 时，回退为 GET 统一获取（下载 ZIP 后从响应头读 ETag 做版本比对）。
 - 版本一致则使用本地缓存，不一致则解压落盘并更新元数据。
 - 本地缓存目录由 `ObjectKey` 决定，目录中保存 `*.in` 文件与 `_meta.properties`。
 - 当前版本无独立缓存管理 API（无 `/cache/*` 路由）。
@@ -376,8 +376,8 @@ public class BatchExecuteRequest {
     @NotBlank(message = "inputDataUrl 不能为空，且必须是 zip 文件 URL")
     private String inputDataUrl;
 
-    /** 预签名 HEAD URL，用于高效探测远端元数据。可选，缺省时回退为 GET 统一获取。 */
-    private String inputDataHeadUrl;
+    /** 输入数据版本号（如 sha256），用于本地缓存比对。可选，缺省时回退为 GET 统一获取。 */
+    private String inputDataVersion;
 
     private Integer timeLimit;
     private Integer memoryLimit;

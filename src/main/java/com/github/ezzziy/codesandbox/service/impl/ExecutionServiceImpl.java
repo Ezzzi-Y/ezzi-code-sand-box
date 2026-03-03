@@ -233,7 +233,7 @@ public class ExecutionServiceImpl implements ExecutionService {
 
         InputDataSet inputDataSet = inputDataService.getInputDataSet(
                 request.getInputDataUrl(),
-                request.getInputDataHeadUrl()
+                request.getInputDataVersion()
         );
         return inputDataSet.getInputs() == null ? new ArrayList<>() : inputDataSet.getInputs();
     }

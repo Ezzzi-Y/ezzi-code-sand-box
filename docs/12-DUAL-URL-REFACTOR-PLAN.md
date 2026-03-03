@@ -1,8 +1,9 @@
 # 双 URL 方案：HEAD 探测 + GET 下载分离
 
-> 状态：**📝 待实施**
+> 状态：**❌ 已废弃**
 > 日期：2026-03-02
 > 前置文档：[10-SIGNED-GET-ETAG-SOLUTION.md](10-SIGNED-GET-ETAG-SOLUTION.md)
+> 废弃说明：阿里云 OSS 不支持 HEAD 方法，本方案无法落地。已被 [13-VERSION-STRING-CACHE-REFACTOR-PLAN.md](13-VERSION-STRING-CACHE-REFACTOR-PLAN.md)（版本号驱动缓存方案）取代。
 
 ---
 
