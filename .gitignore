@@ -1,10 +1,25 @@
 HELP.md
+
+# Build outputs
 target/
-.mvn/wrapper/maven-wrapper.jar
+build/
+out/
 !**/src/main/**/target/
 !**/src/test/**/target/
+!**/src/main/**/build/
+!**/src/test/**/build/
 
-### STS ###
+# Maven wrapper binary
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse / STS
 .apt_generated
 .classpath
 .factorypath
@@ -13,21 +28,49 @@ target/
 .springBeans
 .sts4-cache
 
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
-
-### NetBeans ###
+# NetBeans
 /nbproject/private/
 /nbbuild/
 /dist/
 /nbdist/
 /.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
 
-### VS Code ###
-.vscode/
+# OS / temp
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# Logs
+*.log
+logs/
+
+# Test / coverage
+.coverage
+.pytest_cache/
+coverage/
+
+# Runtime local data
+sandbox-work/
+sandbox-inputs/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+*.crt
+
+# Local archives and dumps
+*.zip
+*.tar
+*.gz
+*.tgz
+*.7z
+*.dump
