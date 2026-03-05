@@ -1,228 +1,169 @@
 <div align="center">
-  <h1>🛡️ Ezzi Code Sandbox</h1>
-  <p>
-    <strong>独立、安全、高效、可扩展的 Docker 代码执行沙箱服务</strong>
-  </p>
-
-  <p>
-    <a href="#-核心特性">核心特性</a> •
-    <a href="#-快速开始">快速开始</a> •
-    <a href="#-系统架构">系统架构</a> •
-    <a href="#-api-使用">API 使用</a>
-  </p>
-
+  <h1>Ezzi Code Sandbox</h1>
+  <p><strong>基于Docker容器的代码执行沙箱服务</strong></p>
   <p>
     <img src="https://img.shields.io/badge/Java-21-orange?logo=java" alt="Java 21">
-    <img src="https://img.shields.io/badge/Spring%20Boot-3.x-green?logo=springboot" alt="Spring Boot 3">
+    <img src="https://img.shields.io/badge/Spring%20Boot-3.5.x-green?logo=springboot" alt="Spring Boot">
     <img src="https://img.shields.io/badge/Docker-20.10+-blue?logo=docker" alt="Docker">
-    <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License">
+    <img src="https://img.shields.io/badge/License-Apache%202.0-blue" alt="Apache 2.0">
   </p>
 </div>
 
 ---
 
-## 📖 项目简介
+## 项目简介
 
-**Ezzi Code Sandbox** 是一个独立的高性能、安全代码执行服务。本项目基于 Spring Boot 和 Docker 构建，旨在为多种编程语言提供安全、隔离的编译和运行环境，可被在线评测平台、教学平台、代码练习平台等上游系统调用。
+`ezzi-code-sand-box` 是一个独立部署的代码执行服务，负责接收代码和输入数据，在隔离容器中编译/运行，并返回结构化执行结果。
 
-与传统的进程级沙箱不同，本项目利用 **Docker-in-Docker (Socket 挂载)** 技术实现了更强的隔离性，同时保持了接近原生的执行性能。它能够自动管理容器生命周期，严格控制资源使用（CPU、内存、时间），并实施主要的安全策略。
+项目定位为“可被上游业务系统调用的执行引擎”，典型场景包括：
 
-## ✨ 核心特性
+- 在线评测（OJ）
+- 编程教学平台
+- AI生成代码执行
+- 代码练习与面试系统
 
-- **🔐 强效隔离**: 每次代码执行都在独立的、临时的 Docker 容器中运行，互不干扰。
-- **⚡ 高性能**: 直接利用 Docker API 进行容器的秒级创建与销毁；支持容器复用策略（可选）。
-- **🌍 多语言支持**:
-  - **C** (GCC 11)
-  - **C++** (G++ 11)
-  - **Java** (JDK 8 / 17)
-  - **Python** (3.10)
+## 核心特性
 
-- **🛡️ 安全优先**:
-  - 严格的内存与执行时间限制。
-  - 输出内容大小限制（防止内存溢出）。
-  - 只读文件系统（除特定的工作目录外）。
-  - 网络访问隔离。
-- **🚀 极简部署**: 支持 Docker Compose 一键部署。
+- **多语言执行**：`c`、`cpp11`、`java8`、`java17`、`python3`
+- **容器隔离**：每次请求在受限 Docker 容器中执行，执行容器网络默认禁用
+- **资源限制**：内存/CPU/超时/进程数/输出大小均可配置
+- **安全防护**：危险代码模式扫描、Capabilities 全量裁剪、非 root 用户执行
+- **高吞吐优化**：支持容器池（预热、复用、回收）
+- **输入缓存**：批量执行支持 URL + 版本号缓存，命中时可零下载
 
-## 🛠 技术栈
+## 技术栈
 
-- **核心框架**: Spring Boot 3.5.7
-- **容器化**: Docker & Docker Java Client (3.3.4)
-- **工具库**: Hutool, Lombok, Caffeine (本地缓存)
-- **存储**: MinIO / Aliyun OSS (用于测试用例管理)
+- Java 21
+- Spring Boot 3.5.7
+- docker-java 3.3.4（zerodep transport）
+- Apache Commons Compress / Commons IO / Hutool
+- Docker Compose（部署）
 
-## 🚀 快速开始
+## 快速开始
 
-推荐使用 Docker Compose 进行快速部署。
+### 1) 环境要求
 
-### 环境要求
-- Linux / macOS / Windows (推荐 WSL2)
-- **Docker** 20.10+
-- **Docker Compose**
+- Linux 主机（推荐）
+- Docker 20.10+
+- Docker Compose v2
 
-### 安装步骤
+### 2) 克隆仓库
 
-1.  **克隆项目**
-    ```bash
-    git clone https://github.com/ezzzi-y/ezzi-code-sand-box.git
-    cd ezzi-code-sand-box
-    ```
-
-2.  **拉取语言镜像** (仅首次需要在宿主机执行)
-    ```bash
-    # 这些是代码执行所必需的基础镜像
-    docker pull gcc:11
-    docker pull eclipse-temurin:8-jdk-alpine
-    docker pull eclipse-temurin:17-jdk-alpine
-    docker pull python:3.10
-    docker pull golang:1.20
-    ```
-
-3.  **启动服务**
-    ```bash
-    docker-compose up -d
-    ```
-
-4.  **验证服务状态**
-    ```bash
-    curl http://localhost:6060/sandbox/api/health/ping
-    # 预期响应: "pong"
-    ```
-
-## ⚙️ 配置说明
-
-核心配置位于 `application.yml` 文件中：
-
-```yaml
-sandbox:
-  execution:
-    work-dir: /var/lib/sandbox-work      # 宿主机上用于存放临时文件的路径
-    compile-timeout: 30                   # 编译超时时间 (秒)
-    run-timeout: 10                       # 运行超时时间 (秒)
-    memory-limit: 256                     # 内存限制 (MB)
-  docker:
-    host: unix:///var/run/docker.sock     # Docker Socket 连接地址
+```bash
+git clone https://github.com/ezzzi-y/ezzi-code-sand-box.git
+cd ezzi-code-sand-box
 ```
 
-## 🔌 API 使用
+### 3) 构建沙箱运行时镜像
 
-### 单次执行代码 (HTTP)
-
-**接口地址**: `POST /sandbox/api/execute/single`
-
-**请求示例**:
-```json
-{
-  "requestId": "test-req-001",
-  "language": "python3",
-  "code": "print(sum(map(int, input().split())))",
-  "input": "10 20",
-  "timeLimit": 1000,
-  "memoryLimit": 256
-}
+```bash
+docker compose build sandbox-gcc sandbox-java8 sandbox-java17 sandbox-python
 ```
 
-**响应示例**:
-```json
-{
-  "code": 1,
-  "message": "success",
-  "data": {
-    "status": "SUCCESS",
-    "compileOutput": null,
-    "errorMessage": null,
-    "result": {
-      "index": 1,
-      "status": "SUCCESS",
-      "output": "30",
-      "errorOutput": "",
-      "time": 35,
-      "memory": 6204,
-      "exitCode": 0
-    },
-    "totalTime": 45
-  }
-}
+### 4) 启动服务
+
+```bash
+docker compose up -d sandbox
 ```
 
-### 批量执行代码 (HTTP)
+### 5) 健康检查
 
-**接口地址**: `POST /sandbox/api/execute/batch`
-
-**请求示例**:
-```json
-{
-  "requestId": "test-req-002",
-  "language": "python3",
-  "code": "print(sum(map(int, input().split())))",
-  "inputDataUrl": "https://example.com/question-1001-inputs.zip?signature=xxx",
-  "timeLimit": 1000,
-  "memoryLimit": 256
-}
+```bash
+curl http://localhost:6060/health/ping
 ```
 
-**响应示例**:
-```json
-{
-  "code": 1,
-  "message": "success",
-  "data": {
-    "status": "SUCCESS",
-    "compileOutput": null,
-    "errorMessage": null,
-    "results": [
-      {
-        "index": 1,
-        "status": "SUCCESS",
-        "output": "3",
-        "errorOutput": "",
-        "time": 12,
-        "memory": 2000,
-        "exitCode": 0
-      }
-    ],
-    "summary": {
-      "total": 3,
-      "success": 3,
-      "failed": 0
-    },
-    "totalTime": 82
-  }
-}
+返回体为统一 `Result` 结构，`code=1` 表示成功。
+
+## API 概览
+
+> 所有接口默认无额外前缀，直接以 `/execute/*`、`/health/*` 访问。
+
+| 接口 | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| 单次执行 | POST | `/execute/single` | 单输入执行 |
+| 批量执行 | POST | `/execute/batch` | 多测试用例执行 |
+| 语言列表 | GET | `/execute/languages` | 当前支持语言 |
+| 健康检查 | GET | `/health` | 详细健康信息 |
+| 存活探针 | GET | `/health/ping` | 基础可用性检查 |
+| Liveness | GET | `/health/liveness` | K8s 存活探针 |
+| Readiness | GET | `/health/readiness` | K8s 就绪探针 |
+
+### 单次执行示例
+
+```bash
+curl -X POST 'http://localhost:6060/execute/single' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "requestId":"demo-single-001",
+    "language":"python3",
+    "code":"print(sum(map(int, input().split())))",
+    "input":"10 20",
+    "timeLimit":1000,
+    "memoryLimit":256
+  }'
 ```
 
-### 输入数据缓存策略
+### 批量执行示例
 
-- 批量请求必须提供 `inputDataUrl`，且 URL 必须指向 zip 输入数据包。
-- zip 中只包含输入数据文件，命名规则为 `1.in`、`2.in`、`3.in`...
-- 服务在每次执行前先请求远端对象元数据。
-- 以 `ETag` 与 `Last-Modified` 与本地缓存元数据比较：
-  - 一致：直接使用本地缓存。
-  - 不一致：重新下载并覆盖本地缓存。
-- 不再提供手动触发的缓存更新接口。
+```bash
+curl -X POST 'http://localhost:6060/execute/batch' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "requestId":"demo-batch-001",
+    "language":"java17",
+    "code":"import java.util.*; public class Main { public static void main(String[] a){ Scanner s=new Scanner(System.in); int x=s.nextInt(), y=s.nextInt(); System.out.println(x+y);} }",
+    "inputDataUrl":"https://example.com/inputs.zip?signature=xxx",
+    "inputDataVersion":"sha256:abcd1234",
+    "timeLimit":1000,
+    "memoryLimit":256
+  }'
+```
 
-## 🏗 系统架构
+## 配置说明
 
-本项目采用分层架构设计，分离了 API 层、业务逻辑层和 Docker 执行器层。
+核心配置文件：`src/main/resources/application.yml`
 
-> 如需了解详细的架构设计，请参阅 [架构设计文档](docs/01-ARCHITECTURE.md)。
+重点配置项：
 
-## 🤝 贡献指南
+- `sandbox.docker.host`：Docker socket 地址（默认 `unix:///var/run/docker.sock`）
+- `sandbox.pool.*`：容器池开关与容量
+- `sandbox.execution.*`：编译/运行超时、CPU/内存、输出限制、并发限制
+- `sandbox.input-data.*`：输入数据本地缓存目录、下载超时、文件大小限制
 
-欢迎提交 Issue 和 Pull Request！
+## 项目文档
 
-1.  Fork 本项目
-2.  创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3.  提交改动 (`git commit -m 'Add some AmazingFeature'`)
-4.  推送到分支 (`git push origin feature/AmazingFeature`)
-5.  提交 Pull Request
+仓库内提供了完整设计文档：
 
-## 📄 许可证
+- [系统架构](docs/01-ARCHITECTURE.md)
+- [API 设计](docs/02-API-DESIGN.md)
+- [Docker 执行器](docs/03-DOCKER-EXECUTOR.md)
+- [语言支持](docs/04-LANGUAGE-SUPPORT.md)
+- [安全机制](docs/05-SECURITY.md)
+- [缓存与版本方案](docs/06-CACHE-OSS.md)
 
-本项目基于 **MIT License** 开源。详情请参阅 [LICENSE](LICENSE) 文件。
+## 开发与测试
 
----
+本地运行：
 
-<div align="center">
-  <p>Made with ❤️ by <a href="https://github.com/ezzzi-y">Ezzzi-Y</a></p>
-</div>
+```bash
+./mvnw spring-boot:run
+```
+
+运行测试：
+
+```bash
+./mvnw test
+```
+
+## 贡献指南
+
+欢迎提交 Issue / PR。建议流程：
+
+1. Fork 仓库
+2. 创建分支（如 `feature/xxx` 或 `fix/xxx`）
+3. 提交变更并补充必要文档
+4. 发起 Pull Request
+
+## License
+
+本项目采用 [Apache License 2.0](LICENSE)。
