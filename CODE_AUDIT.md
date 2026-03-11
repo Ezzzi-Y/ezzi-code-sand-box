@@ -1,193 +1,193 @@
-# Code Quality Audit Report
+# 代码质量审计报告
 
-**Project:** ezzi-code-sand-box  
-**Date:** 2026-03-11  
-**Auditor Role:** Principal Software Engineer  
-**Scope:** Full codebase review — architecture, design, code smells, security, and refactoring recommendations
-
----
-
-## Table of Contents
-
-1. [Executive Summary](#1-executive-summary)
-2. [What the Code Does](#2-what-the-code-does)
-3. [Module & Class Inventory](#3-module--class-inventory)
-4. [Architecture Evaluation](#4-architecture-evaluation)
-5. [Code Smell Analysis](#5-code-smell-analysis)
-6. [Detailed Findings](#6-detailed-findings)
-7. [Refactoring Suggestions](#7-refactoring-suggestions)
-8. [Example Improved Structure](#8-example-improved-structure)
-9. [Summary & Prioritized Action Items](#9-summary--prioritized-action-items)
+**项目名称：** ezzi-code-sand-box  
+**审计日期：** 2026-03-11  
+**审计角色：** 首席软件工程师  
+**审计范围：** 全代码库审查 — 架构设计、代码异味、安全性及重构建议
 
 ---
 
-## 1. Executive Summary
+## 目录
 
-The **ezzi-code-sand-box** is a Docker-based remote code execution sandbox built with Spring Boot 3.5.7 and Java 21. It supports five programming languages (C, C++11, Java 8, Java 17, Python 3) and provides REST APIs for single and batch code execution. The project demonstrates solid domain understanding with good security practices (network isolation, capability dropping, dangerous-code scanning, sandboxed user execution).
+1. [总体概述](#1-总体概述)
+2. [代码功能说明](#2-代码功能说明)
+3. [模块与类清单](#3-模块与类清单)
+4. [架构评估](#4-架构评估)
+5. [代码异味分析](#5-代码异味分析)
+6. [详细发现](#6-详细发现)
+7. [重构建议](#7-重构建议)
+8. [改进后的结构示例](#8-改进后的结构示例)
+9. [总结与优先级行动项](#9-总结与优先级行动项)
 
-**Overall Architecture Rating: B+** — The layered design (Controller → Service → Executor) is sound. The Strategy pattern for language support is well applied. However, several code smells — most notably **Duplicate Code** in `DockerCodeExecutor` and **Long Function** patterns — reduce maintainability and increase the risk of bugs propagating during future changes.
+---
 
-### Key Metrics
+## 1. 总体概述
 
-| Metric | Value |
+**ezzi-code-sand-box** 是一个基于 Docker 的远程代码执行沙箱，使用 Spring Boot 3.5.7 和 Java 21 构建。支持五种编程语言（C、C++11、Java 8、Java 17、Python 3），通过 REST API 提供单次和批量代码执行功能。项目展现了扎实的领域理解和良好的安全实践（网络隔离、能力丢弃、危险代码扫描、沙箱用户执行）。
+
+**架构总评：B+** — 分层设计（Controller → Service → Executor）合理，策略模式在语言支持上的应用恰当。但 `DockerCodeExecutor` 中的**重复代码**和**过长函数**等代码异味降低了可维护性，增加了 Bug 传播的风险。
+
+### 关键指标
+
+| 指标 | 值 |
 |---|---|
-| Total Java source files | ~35 production + 1 test |
-| Largest file | `DockerCodeExecutor.java` (~930 lines) |
-| Languages supported | 5 (C, C++11, Java 8, Java 17, Python 3) |
-| REST endpoints | 7 |
-| Test coverage | Minimal (1 context-load test) |
+| Java 源文件总数 | ~35 个生产文件 + 1 个测试文件 |
+| 最大文件 | `DockerCodeExecutor.java`（约 930 行） |
+| 支持语言数 | 5（C、C++11、Java 8、Java 17、Python 3） |
+| REST 端点数 | 7 |
+| 测试覆盖率 | 极低（仅 1 个上下文加载测试） |
 
 ---
 
-## 2. What the Code Does
+## 2. 代码功能说明
 
-The application is an **online judge / code execution engine** that:
+本应用是一个**在线评测 / 代码执行引擎**，主要流程如下：
 
-1. **Accepts code** via REST API (`/execute/single`, `/execute/batch`) with a specified language and input data.
-2. **Scans for dangerous code patterns** using regex-based rules defined per language (Strategy pattern).
-3. **Acquires a Docker container** — either from a hot container pool (performance mode) or by creating a new one (traditional mode).
-4. **Writes source code** into the container via Docker's TAR copy API.
-5. **Compiles** the code (for compiled languages) inside the container.
-6. **Runs the code** against one or more test case inputs, capturing stdout/stderr with precise nanosecond-level timing and memory measurement.
-7. **Returns structured results** including execution status, output, time, and memory usage.
-8. **Cleans up** task directories and releases containers back to the pool.
+1. **接收代码** — 通过 REST API（`/execute/single`、`/execute/batch`）接收代码、语言类型和输入数据。
+2. **危险代码扫描** — 使用按语言定义的正则规则检测危险模式（策略模式）。
+3. **获取 Docker 容器** — 从热容器池中获取（高性能模式）或新建容器（传统模式）。
+4. **写入源码** — 通过 Docker TAR 拷贝 API 将源码写入容器。
+5. **编译代码** — 对编译型语言在容器内执行编译。
+6. **运行代码** — 逐个执行测试用例，捕获 stdout/stderr，同时进行纳秒级计时和内存监测。
+7. **返回结果** — 返回结构化的执行结果，包含状态、输出、用时和内存使用量。
+8. **资源清理** — 清理任务目录，归还容器到池中。
 
-### Execution Flow
+### 执行流程
 
 ```
-HTTP Request → ExecuteController → ExecutionServiceImpl → DockerCodeExecutor
-                                                              ├── LanguageStrategyFactory → LanguageStrategy (scan, compile/run commands)
-                                                              ├── ContainerPool → PooledContainer (acquire/release)
-                                                              ├── ContainerManager (create, start, stop, remove)
-                                                              └── Docker API (exec, copy, inspect)
+HTTP 请求 → ExecuteController → ExecutionServiceImpl → DockerCodeExecutor
+                                                           ├── LanguageStrategyFactory → LanguageStrategy（扫描、编译/运行命令）
+                                                           ├── ContainerPool → PooledContainer（获取/归还）
+                                                           ├── ContainerManager（创建、启动、停止、删除）
+                                                           └── Docker API（exec、copy、inspect）
 ```
 
 ---
 
-## 3. Module & Class Inventory
+## 3. 模块与类清单
 
-### 3.1 Layers & Responsibilities
+### 3.1 分层与职责
 
-| Layer | Package | Classes | Responsibility |
+| 层级 | 包名 | 类 | 职责 |
 |---|---|---|---|
-| **API** | `controller` | `ExecuteController`, `HealthController` | REST endpoint definitions, request validation |
-| **Service** | `service` / `service.impl` | `ExecutionService(Impl)`, `HealthService(Impl)`, `InputDataService(Impl)` | Business orchestration, input resolution, health checks |
-| **Executor** | `executor` | `DockerCodeExecutor`, `ContainerManager`, `CommandResult` | Core Docker command execution, container lifecycle |
-| **Pool** | `pool` | `ContainerPool`, `PooledContainer` | Hot container pool management with locking |
-| **Strategy** | `strategy` | `LanguageStrategy` (interface), `LanguageStrategyFactory`, 5 concrete strategies | Language-specific compilation/execution/security rules |
-| **Model** | `model.dto` / `model.vo` | DTOs and View Objects (8 classes) | Data transfer and response shapes |
-| **Config** | `config` | `DockerConfig`, `ExecutionConfig` | Spring configuration beans |
-| **Exception** | `exception` | `SandboxException` + 5 subclasses, `GlobalExceptionHandler` | Error hierarchy and centralized handling |
-| **Common** | `common.enums` / `common.result` | `ExecutionStatus`, `LanguageEnum`, `Result` | Shared enums and response wrapper |
-| **Util** | `util` | `OssUrlParser` | URL parsing utility |
+| **API 层** | `controller` | `ExecuteController`、`HealthController` | REST 端点定义、请求校验 |
+| **服务层** | `service` / `service.impl` | `ExecutionService(Impl)`、`HealthService(Impl)`、`InputDataService(Impl)` | 业务编排、输入解析、健康检查 |
+| **执行器层** | `executor` | `DockerCodeExecutor`、`ContainerManager`、`CommandResult` | Docker 命令执行核心、容器生命周期 |
+| **连接池层** | `pool` | `ContainerPool`、`PooledContainer` | 热容器池管理（含锁机制） |
+| **策略层** | `strategy` | `LanguageStrategy`（接口）、`LanguageStrategyFactory`、5 个具体策略 | 语言相关的编译/执行/安全规则 |
+| **模型层** | `model.dto` / `model.vo` | DTO 和 VO（共 8 个类） | 数据传输与响应结构 |
+| **配置层** | `config` | `DockerConfig`、`ExecutionConfig` | Spring 配置 Bean |
+| **异常层** | `exception` | `SandboxException` + 5 个子类、`GlobalExceptionHandler` | 异常体系与统一异常处理 |
+| **公共层** | `common.enums` / `common.result` | `ExecutionStatus`、`LanguageEnum`、`Result` | 共享枚举与统一响应包装 |
+| **工具层** | `util` | `OssUrlParser` | URL 解析工具 |
 
-### 3.2 Key Classes by Size (Approximate LOC)
+### 3.2 关键类代码行数（近似值）
 
-| Class | LOC | Concern |
+| 类 | 行数 | 关注点 |
 |---|---|---|
-| `DockerCodeExecutor` | ~930 | ⚠️ Largest — execution orchestration, shell command building, output parsing, file I/O |
-| `ContainerPool` | ~460 | Container pool lifecycle, locking, scheduled cleanup |
-| `InputDataServiceImpl` | ~441 | ZIP download, caching, version comparison |
-| `ContainerManager` | ~373 | Docker container CRUD operations |
-| `ExecutionServiceImpl` | ~260 | Business logic orchestration |
-| Language strategies | ~100–125 each | Language-specific commands and patterns |
+| `DockerCodeExecutor` | ~930 | ⚠️ 最大 — 执行编排、Shell 命令构建、输出解析、文件 I/O |
+| `ContainerPool` | ~460 | 容器池生命周期、锁机制、定时清理 |
+| `InputDataServiceImpl` | ~441 | ZIP 下载、缓存、版本比对 |
+| `ContainerManager` | ~373 | Docker 容器 CRUD 操作 |
+| `ExecutionServiceImpl` | ~260 | 业务逻辑编排 |
+| 各语言策略类 | 每个约 100–125 | 语言特定命令与规则 |
 
 ---
 
-## 4. Architecture Evaluation
+## 4. 架构评估
 
-### 4.1 Strengths
+### 4.1 优势
 
-| Area | Assessment |
+| 领域 | 评估 |
 |---|---|
-| **Layered architecture** | ✅ Clear Controller → Service → Executor layering with interface-based service contracts |
-| **Strategy pattern** | ✅ Well-applied for language support; new languages can be added by implementing `LanguageStrategy` |
-| **Container pool** | ✅ Solid implementation with proper locking, scheduled cleanup, and zombie detection |
-| **Security** | ✅ Multi-layered: network disabled, capabilities dropped, sandboxed user, code scanning, resource limits |
-| **Configuration** | ✅ Externalized via `ExecutionConfig` with sensible defaults |
-| **Exception hierarchy** | ✅ Clean domain-specific exception tree rooted at `SandboxException` |
-| **Docker integration** | ✅ Proper use of docker-java API with TAR-based file copy and exec-based command execution |
+| **分层架构** | ✅ 清晰的 Controller → Service → Executor 分层，基于接口的服务契约 |
+| **策略模式** | ✅ 语言支持上运用得当，新增语言只需实现 `LanguageStrategy` 接口 |
+| **容器池** | ✅ 实现稳健，具备正确的锁机制、定时清理和僵尸容器检测 |
+| **安全性** | ✅ 多层防护：禁用网络、丢弃能力、沙箱用户、代码扫描、资源限制 |
+| **配置管理** | ✅ 通过 `ExecutionConfig` 外部化配置，默认值合理 |
+| **异常体系** | ✅ 以 `SandboxException` 为根的领域异常层次清晰 |
+| **Docker 集成** | ✅ 正确使用 docker-java API，基于 TAR 的文件拷贝和 exec 命令执行 |
 
-### 4.2 Weaknesses
+### 4.2 不足
 
-| Area | Assessment |
+| 领域 | 评估 |
 |---|---|
-| **`DockerCodeExecutor` size** | ⚠️ 930 lines — God Object tendency; mixes orchestration, shell-building, output parsing, file I/O |
-| **Duplicate code** | ⚠️ `executeCommand()` and `executeCommandInDir()` are ~90% identical (~160 lines each) |
-| **Duplicate result mapping** | ⚠️ `runCode()` and `runCodeInTaskDir()` have nearly identical result-mapping logic |
-| **Test coverage** | ❌ Only 1 context-load test; no unit tests for strategies, executor, pool, or services |
-| **Error handling** | ⚠️ Extensive use of `RuntimeException` instead of domain-specific exceptions in several places |
-| **Inconsistent formatting** | ⚠️ `ExecutionServiceImpl` has inconsistent indentation (mix of 4-space and 16-space blocks) |
-| **Unused dependencies** | ⚠️ `pom.xml` includes JJWT, POI, MyBatis Plus, OKHttp — not referenced in source code |
-| **Hardcoded values** | ⚠️ Some magic numbers/strings scattered (e.g., retry counts, sleep durations, path prefixes) |
+| **`DockerCodeExecutor` 体量** | ⚠️ 930 行 — 有上帝对象（God Object）倾向，混合了编排、Shell 构建、输出解析、文件 I/O |
+| **重复代码** | ⚠️ `executeCommand()` 和 `executeCommandInDir()` 约 90% 重复（各约 160 行） |
+| **重复结果映射** | ⚠️ `runCode()` 和 `runCodeInTaskDir()` 具有几乎相同的结果映射逻辑 |
+| **测试覆盖** | ❌ 仅 1 个上下文加载测试；策略、执行器、连接池、服务均无单元测试 |
+| **异常处理** | ⚠️ 多处使用 `RuntimeException` 而非领域特定异常 |
+| **格式不一致** | ⚠️ `ExecutionServiceImpl` 中存在缩进不一致（4 空格与 16 空格混用） |
+| **未使用的依赖** | ⚠️ `pom.xml` 中包含 JJWT、POI、MyBatis Plus、OKHttp — 源码中未引用 |
+| **硬编码值** | ⚠️ 存在分散的魔法数字/字符串（如重试次数、休眠时长、路径前缀） |
 
-### 4.3 Separation of Concerns
+### 4.3 关注点分离
 
-| Concern | Current Location | Assessment |
+| 关注点 | 当前位置 | 评估 |
 |---|---|---|
-| Shell command construction | `DockerCodeExecutor` | ⚠️ Should be extracted to a dedicated builder |
-| Output/time/memory parsing | `DockerCodeExecutor` | ⚠️ Should be extracted to a parser class |
-| File I/O (TAR creation, file writes) | `DockerCodeExecutor` | ⚠️ Could be separated into a utility |
-| Result mapping (CommandResult → ExecutionResult) | `DockerCodeExecutor` | ⚠️ Duplicated between traditional and pool modes |
-| Container lifecycle | `ContainerManager` | ✅ Well-encapsulated |
-| Pool management | `ContainerPool` | ✅ Well-encapsulated |
+| Shell 命令构建 | `DockerCodeExecutor` | ⚠️ 应抽取到专用的构建器类 |
+| 输出/时间/内存解析 | `DockerCodeExecutor` | ⚠️ 应抽取到解析器类 |
+| 文件 I/O（TAR 创建、文件写入） | `DockerCodeExecutor` | ⚠️ 可分离到工具类 |
+| 结果映射（CommandResult → ExecutionResult） | `DockerCodeExecutor` | ⚠️ 在传统模式和池模式之间重复 |
+| 容器生命周期 | `ContainerManager` | ✅ 封装良好 |
+| 池管理 | `ContainerPool` | ✅ 封装良好 |
 
-### 4.4 Dependency Management
+### 4.4 依赖管理
 
-- **Unused dependencies in `pom.xml`**: `jjwt-api`, `jjwt-impl`, `jjwt-jackson`, `poi`, `poi-ooxml`, `mybatis-plus-spring-boot3-starter`, `okhttp` — none of these are imported in any source file. This adds unnecessary build time and attack surface.
-- **Hutool** is used only in `InputDataServiceImpl` for HTTP requests (`cn.hutool.http`). Consider whether this justifies the entire library as a dependency.
+- **`pom.xml` 中未使用的依赖**：`jjwt-api`、`jjwt-impl`、`jjwt-jackson`、`poi`、`poi-ooxml`、`mybatis-plus-spring-boot3-starter`、`okhttp` — 源码中均未导入。这增加了不必要的构建时间和安全攻击面。
+- **Hutool** 仅在 `InputDataServiceImpl` 中用于 HTTP 请求（`cn.hutool.http`），是否值得引入整个库值得评估。
 
 ---
 
-## 5. Code Smell Analysis
+## 5. 代码异味分析
 
-### 5.1 Code Smell Summary
+### 5.1 代码异味总览
 
-| # | Smell | Severity | Location | Description |
+| # | 异味类型 | 严重程度 | 位置 | 描述 |
 |---|---|---|---|---|
-| 1 | **Long Function / God Object** | 🔴 High | `DockerCodeExecutor` (930 LOC) | Single class handles orchestration, shell construction, output parsing, file I/O, and result mapping |
-| 2 | **Duplicate Code** | 🔴 High | `executeCommand()` vs `executeCommandInDir()` | ~160 lines duplicated with only a `cd` prefix difference |
-| 3 | **Duplicate Code** | 🟠 Medium | `runCode()` vs `runCodeInTaskDir()` | Nearly identical result-mapping logic (~50 lines) |
-| 4 | **Duplicate Code** | 🟠 Medium | `executeTraditional()` vs `executeWithPool()` | Same compile→run→collect pattern with minor variations |
-| 5 | **Duplicate Code** | 🟡 Low | `executeSingle()` vs `executeBatch()` | Similar validation, strategy lookup, and exception handling |
-| 6 | **Primitive Obsession** | 🟠 Medium | `DockerCodeExecutor.execute()` | 6 primitive parameters instead of a request/context object |
-| 7 | **Primitive Obsession** | 🟠 Medium | `HealthServiceImpl` | Returns `Map<String, Object>` instead of typed response objects |
-| 8 | **Data Clumps** | 🟡 Low | `(containerId, strategy, taskDir)` | Frequently passed together — could be encapsulated |
-| 9 | **Feature Envy** | 🟡 Low | `DockerCodeExecutor` | Extensively manipulates `CommandResult` fields — parsing logic should belong to `CommandResult` |
-| 10 | **Shotgun Surgery** | 🟡 Low | Adding a new execution mode | Would require changes in `DockerCodeExecutor` (2 places), `ContainerManager`, `ContainerPool` |
-| 11 | **Inconsistent Formatting** | 🟡 Low | `ExecutionServiceImpl` | Mixed indentation in `executeBatch()` method (appears auto-formatted differently) |
+| 1 | **过长函数 / 上帝对象** | 🔴 高 | `DockerCodeExecutor`（930 行） | 单个类承担编排、Shell 构建、输出解析、文件 I/O 和结果映射 |
+| 2 | **重复代码** | 🔴 高 | `executeCommand()` vs `executeCommandInDir()` | 约 160 行重复，仅差 `cd` 前缀 |
+| 3 | **重复代码** | 🟠 中 | `runCode()` vs `runCodeInTaskDir()` | 几乎相同的结果映射逻辑（约 50 行） |
+| 4 | **重复代码** | 🟠 中 | `executeTraditional()` vs `executeWithPool()` | 相同的编译→运行→收集模式，仅有细微差异 |
+| 5 | **重复代码** | 🟡 低 | `executeSingle()` vs `executeBatch()` | 类似的校验、策略查找和异常处理 |
+| 6 | **基本类型偏执** | 🟠 中 | `DockerCodeExecutor.execute()` | 6 个基本类型参数，缺少请求/上下文对象 |
+| 7 | **基本类型偏执** | 🟠 中 | `HealthServiceImpl` | 返回 `Map<String, Object>` 而非类型化的响应对象 |
+| 8 | **数据泥团** | 🟡 低 | `(containerId, strategy, taskDir)` | 频繁一起传递，可以封装为对象 |
+| 9 | **特性依恋** | 🟡 低 | `DockerCodeExecutor` | 大量操作 `CommandResult` 字段 — 解析逻辑应属于 `CommandResult` |
+| 10 | **霰弹式修改** | 🟡 低 | 新增执行模式时 | 需要修改 `DockerCodeExecutor`（2 处）、`ContainerManager`、`ContainerPool` |
+| 11 | **格式不一致** | 🟡 低 | `ExecutionServiceImpl` | `executeBatch()` 方法中缩进风格混乱 |
 
-### 5.2 Detailed Smell Analysis
+### 5.2 异味详细分析
 
-#### 5.2.1 Duplicate Code — `executeCommand()` vs `executeCommandInDir()` (Critical)
+#### 5.2.1 重复代码 — `executeCommand()` vs `executeCommandInDir()`（严重）
 
-These two methods in `DockerCodeExecutor` are ~160 lines each and are nearly identical. The only difference is that `executeCommandInDir()` prepends a `cd <workDir> &&` to the shell command. Both methods:
+`DockerCodeExecutor` 中这两个方法各约 160 行，几乎完全相同。唯一的区别是 `executeCommandInDir()` 在 Shell 命令前加了 `cd <workDir> &&`。两个方法都执行以下步骤：
 
-1. Build a timed shell command with `date +%s%N` and `/usr/bin/time`
-2. Handle input escaping and piping
-3. Create a Docker exec instance
-4. Capture stdout/stderr
-5. Wait for completion with timeout
-6. Parse time markers and memory markers from output
-7. Check output limits
-8. Return `CommandResult`
+1. 使用 `date +%s%N` 和 `/usr/bin/time` 构建计时 Shell 命令
+2. 处理输入转义和管道
+3. 创建 Docker exec 实例
+4. 捕获 stdout/stderr
+5. 等待完成或超时
+6. 从输出中解析时间标记和内存标记
+7. 检查输出限制
+8. 返回 `CommandResult`
 
-**Risk:** Any bug fix or feature (e.g., changing the timing mechanism) must be applied in two places, and divergence is likely over time.
+**风险：** 任何 Bug 修复或功能变更（如修改计时机制）都必须在两处同时修改，随着时间推移极易产生分歧。
 
-#### 5.2.2 Duplicate Code — `runCode()` vs `runCodeInTaskDir()` (Medium)
+#### 5.2.2 重复代码 — `runCode()` vs `runCodeInTaskDir()`（中等）
 
-Both methods map `CommandResult` → `ExecutionResult` with the same logic chain: check timeout → check memory exceeded → check output exceeded → check exit code → return success. The only difference is how the executable path is constructed.
+两个方法都执行相同的 `CommandResult` → `ExecutionResult` 映射链：检查超时 → 检查内存超限 → 检查输出超限 → 检查退出码 → 返回成功。唯一区别在于可执行文件路径的构建方式。
 
-#### 5.2.3 Long Function / God Object — `DockerCodeExecutor` (Critical)
+#### 5.2.3 过长函数 / 上帝对象 — `DockerCodeExecutor`（严重）
 
-At ~930 lines, this class has too many responsibilities:
-- **Orchestration**: `execute()`, `executeWithPool()`, `executeTraditional()`
-- **Shell command construction**: Building complex shell scripts with timing/memory measurement
-- **Output parsing**: Extracting time/memory markers from stdout
-- **File I/O**: `writeSourceCodeToContainer()`, `writeSourceCode()`, `createWorkDirectory()`
-- **Result mapping**: Converting `CommandResult` to `ExecutionResult`
+该类约 930 行，承担了过多职责：
+- **编排**：`execute()`、`executeWithPool()`、`executeTraditional()`
+- **Shell 命令构建**：构建包含计时/内存监测的复杂 Shell 脚本
+- **输出解析**：从 stdout 中提取时间/内存标记
+- **文件 I/O**：`writeSourceCodeToContainer()`、`writeSourceCode()`、`createWorkDirectory()`
+- **结果映射**：将 `CommandResult` 转换为 `ExecutionResult`
 
-#### 5.2.4 Primitive Obsession — execute() Parameters
+#### 5.2.4 基本类型偏执 — execute() 参数
 
 ```java
 public ExecuteResult execute(LanguageStrategy strategy,
@@ -198,86 +198,86 @@ public ExecuteResult execute(LanguageStrategy strategy,
                              int memoryLimit)
 ```
 
-Six parameters (with more being threaded through to inner methods) indicate a missing **Execution Context** concept.
+六个参数（且继续向内部方法传递）表明缺少一个 **ExecutionContext（执行上下文）** 概念。
 
 ---
 
-## 6. Detailed Findings
+## 6. 详细发现
 
-### 6.1 Encapsulation Issues
+### 6.1 封装问题
 
-1. **`PooledContainer`** uses public setters (`setInUse()`, `setUseCount()`, `setLastUsedTime()`) that are called from `ContainerPool`. These mutations should ideally be encapsulated within `PooledContainer` methods (e.g., `markInUse()`, `markIdle()`, `incrementUseCount()`).
+1. **`PooledContainer`** 使用公开的 setter（`setInUse()`、`setUseCount()`、`setLastUsedTime()`），被 `ContainerPool` 调用。这些状态变更应封装为 `PooledContainer` 的行为方法（如 `markInUse()`、`markIdle()`、`incrementUseCount()`）。
 
-2. **`CommandResult`** is a passive data holder. The output-parsing logic (extracting time/memory markers) in `DockerCodeExecutor` is a form of **Feature Envy** — it would be more cohesive as a factory method on `CommandResult`.
+2. **`CommandResult`** 是一个被动的数据持有者。`DockerCodeExecutor` 中的输出解析逻辑（提取时间/内存标记）属于**特性依恋** — 将其作为 `CommandResult` 的工厂方法会更内聚。
 
-### 6.2 Error Handling
+### 6.2 异常处理
 
-1. **Generic RuntimeException usage**: `ContainerManager.createContainer()`, `InputDataServiceImpl`, and several places in `DockerCodeExecutor` throw `RuntimeException` with Chinese-language messages. These should use domain-specific exceptions (e.g., `ContainerLimitException`, `InputDataException`).
+1. **滥用 RuntimeException**：`ContainerManager.createContainer()`、`InputDataServiceImpl` 以及 `DockerCodeExecutor` 的多处抛出带中文消息的 `RuntimeException`。应使用领域特定异常（如 `ContainerLimitException`、`InputDataException`）。
 
-2. **Silent catch blocks**: `ContainerManager.stopContainer()` and `killContainer()` catch and log but may hide critical failures during cleanup.
+2. **静默 catch 块**：`ContainerManager.stopContainer()` 和 `killContainer()` 捕获异常后仅记录日志，可能隐藏清理过程中的关键故障。
 
-### 6.3 Unused Dependencies (pom.xml)
+### 6.3 未使用的依赖（pom.xml）
 
-The following dependencies are declared but not used anywhere in the source:
+以下依赖已声明但源码中未使用：
 
-| Dependency | Group ID | Usage Found |
+| 依赖 | Group ID | 是否使用 |
 |---|---|---|
-| `jjwt-api` / `jjwt-impl` / `jjwt-jackson` | `io.jsonwebtoken` | ❌ None |
-| `poi` / `poi-ooxml` | `org.apache.poi` | ❌ None |
-| `mybatis-plus-spring-boot3-starter` | `com.baomidou` | ❌ None |
-| `okhttp` | `com.squareup.okhttp3` | ❌ None |
+| `jjwt-api` / `jjwt-impl` / `jjwt-jackson` | `io.jsonwebtoken` | ❌ 未使用 |
+| `poi` / `poi-ooxml` | `org.apache.poi` | ❌ 未使用 |
+| `mybatis-plus-spring-boot3-starter` | `com.baomidou` | ❌ 未使用 |
+| `okhttp` | `com.squareup.okhttp3` | ❌ 未使用 |
 
-These add ~30+ MB to the final artifact and increase the security surface area.
+这些依赖增加了约 30+ MB 的最终构建产物体积，并扩大了安全攻击面。
 
-### 6.4 Configuration Hardcoding
+### 6.4 硬编码配置
 
-| Hardcoded Value | Location | Suggestion |
+| 硬编码值 | 位置 | 建议 |
 |---|---|---|
-| `"sandbox"` user | `ContainerManager`, `DockerCodeExecutor` | Extract to `ExecutionConfig` |
-| `"/sandbox/workspace"` path | `ContainerManager`, `DockerCodeExecutor` | Extract to constant or config |
-| Retry count `5`, sleep `200ms` | `ContainerPool.createAndAddContainer()` | Extract to config |
-| `ACQUIRE_WAIT_SECONDS = 30` | `ContainerPool` | Already a constant ✅, could be config-driven |
+| `"sandbox"` 用户名 | `ContainerManager`、`DockerCodeExecutor` | 抽取到 `ExecutionConfig` |
+| `"/sandbox/workspace"` 路径 | `ContainerManager`、`DockerCodeExecutor` | 抽取为常量或配置项 |
+| 重试次数 `5`、休眠 `200ms` | `ContainerPool.createAndAddContainer()` | 抽取到配置 |
+| `ACQUIRE_WAIT_SECONDS = 30` | `ContainerPool` | 已是常量 ✅，可改为配置驱动 |
 
-### 6.5 Test Coverage
+### 6.5 测试覆盖
 
-The project has only one test (`CodeSandBoxApplicationTests`) which performs a basic Spring context load. There are no unit tests for:
+项目仅有一个测试（`CodeSandBoxApplicationTests`），执行基本的 Spring 上下文加载。以下模块无单元测试：
 
-- Language strategies (dangerous pattern detection)
-- `DockerCodeExecutor` (output parsing, shell escaping)
-- `ContainerPool` (acquire/release/cleanup logic)
-- `InputDataServiceImpl` (caching, ZIP extraction)
-- `OssUrlParser` (URL parsing)
-- `ExecutionServiceImpl` (request validation, error handling)
+- 语言策略（危险代码模式检测）
+- `DockerCodeExecutor`（输出解析、Shell 转义）
+- `ContainerPool`（获取/归还/清理逻辑）
+- `InputDataServiceImpl`（缓存、ZIP 解压）
+- `OssUrlParser`（URL 解析）
+- `ExecutionServiceImpl`（请求校验、异常处理）
 
 ---
 
-## 7. Refactoring Suggestions
+## 7. 重构建议
 
-### 7.1 Priority 1 (High Impact) — Eliminate Duplicate Code in DockerCodeExecutor
+### 7.1 优先级 1（高影响）— 消除 DockerCodeExecutor 中的重复代码
 
-**Problem:** `executeCommand()` and `executeCommandInDir()` are ~90% identical.
+**问题：** `executeCommand()` 和 `executeCommandInDir()` 约 90% 重复。
 
-**Solution:** Unify into a single method that accepts an optional `workDir` parameter.
+**方案：** 合并为一个接受可选 `workDir` 参数的方法。
 
 ```java
-// Before: Two methods of ~160 lines each
+// 重构前：两个约 160 行的方法
 private CommandResult executeCommand(String containerId, String[] cmd, String input, long timeoutMs) { ... }
 private CommandResult executeCommandInDir(String containerId, String[] cmd, String input, long timeoutMs, String workDir) { ... }
 
-// After: Single method with optional workDir
+// 重构后：统一方法，workDir 可为 null
 private CommandResult executeCommand(String containerId, String[] cmd, String input, long timeoutMs, String workDir) {
     String cdPrefix = (workDir != null) ? "cd " + workDir + " && " : "";
-    // ... unified implementation ...
+    // ... 统一实现 ...
 }
 ```
 
-Similarly, unify `runCode()` and `runCodeInTaskDir()` by extracting the shared result-mapping logic.
+同样，通过抽取共享的结果映射逻辑来统一 `runCode()` 和 `runCodeInTaskDir()`。
 
-### 7.2 Priority 2 (High Impact) — Extract Shell Command Builder
+### 7.2 优先级 2（高影响）— 抽取 Shell 命令构建器
 
-**Problem:** Complex shell command construction is inline within the execution methods.
+**问题：** 复杂的 Shell 命令构建逻辑内联在执行方法中。
 
-**Solution:** Extract a `ShellCommandBuilder` utility class.
+**方案：** 抽取 `ShellCommandBuilder` 工具类。
 
 ```java
 public class ShellCommandBuilder {
@@ -302,28 +302,28 @@ public class ShellCommandBuilder {
 }
 ```
 
-### 7.3 Priority 3 (Medium Impact) — Extract Output Parser
+### 7.3 优先级 3（中等影响）— 抽取输出解析器
 
-**Problem:** Time/memory marker parsing from stdout is interleaved with execution logic.
+**问题：** 时间/内存标记解析与执行逻辑交织。
 
-**Solution:** Create a `CommandOutputParser` that encapsulates this:
+**方案：** 创建 `CommandOutputParser` 封装解析逻辑：
 
 ```java
 public class CommandOutputParser {
     public record ParsedOutput(String cleanOutput, long executionTimeMs, long memoryUsageKB) {}
 
     public static ParsedOutput parse(String rawStdout, long fallbackTimeMs) {
-        // Extract TIME_MARKER, MEMORY_MARKER, clean output
-        // Return structured result
+        // 提取 TIME_MARKER、MEMORY_MARKER，清理输出
+        // 返回结构化结果
     }
 }
 ```
 
-### 7.4 Priority 4 (Medium Impact) — Introduce ExecutionContext
+### 7.4 优先级 4（中等影响）— 引入 ExecutionContext
 
-**Problem:** 6+ primitive parameters are threaded through multiple method calls.
+**问题：** 6 个以上的基本类型参数在多个方法调用间传递。
 
-**Solution:** Introduce a context object:
+**方案：** 引入上下文对象：
 
 ```java
 public record ExecutionContext(
@@ -336,11 +336,11 @@ public record ExecutionContext(
 ) {}
 ```
 
-### 7.5 Priority 5 (Medium Impact) — Unify Result Mapping
+### 7.5 优先级 5（中等影响）— 统一结果映射
 
-**Problem:** `runCode()` and `runCodeInTaskDir()` duplicate the `CommandResult` → `ExecutionResult` mapping.
+**问题：** `runCode()` 和 `runCodeInTaskDir()` 中 `CommandResult` → `ExecutionResult` 的映射逻辑重复。
 
-**Solution:** Extract a shared method:
+**方案：** 抽取共享方法：
 
 ```java
 private ExecutionResult mapToExecutionResult(CommandResult result, int index, int timeLimit, int memoryLimit) {
@@ -353,45 +353,45 @@ private ExecutionResult mapToExecutionResult(CommandResult result, int index, in
 }
 ```
 
-### 7.6 Priority 6 (Low Impact) — Remove Unused Dependencies
+### 7.6 优先级 6（低影响）— 移除未使用的依赖
 
-Remove from `pom.xml`:
-- `io.jsonwebtoken:jjwt-api`, `jjwt-impl`, `jjwt-jackson`
-- `org.apache.poi:poi`, `poi-ooxml`
+从 `pom.xml` 中移除：
+- `io.jsonwebtoken:jjwt-api`、`jjwt-impl`、`jjwt-jackson`
+- `org.apache.poi:poi`、`poi-ooxml`
 - `com.baomidou:mybatis-plus-spring-boot3-starter`
 - `com.squareup.okhttp3:okhttp`
 
-### 7.7 Priority 7 (Low Impact) — Fix Indentation in ExecutionServiceImpl
+### 7.7 优先级 7（低影响）— 修复 ExecutionServiceImpl 的缩进
 
-The `executeBatch()` method has inconsistent indentation (mix of 4-space and 16-space). Apply consistent formatting.
+`executeBatch()` 方法存在缩进不一致（4 空格与 16 空格混用），应统一格式化。
 
-### 7.8 Priority 8 (Low Impact) — Add Unit Tests
+### 7.8 优先级 8（低影响）— 补充单元测试
 
-Priority test targets:
-1. **Language strategy pattern detection** — unit test each strategy's `checkDangerousCode()`
-2. **Shell input escaping** — `escapeShellInput()` with edge cases
-3. **Output parsing** — time/memory marker extraction
-4. **OssUrlParser** — URL parsing for different providers
-5. **ContainerPool** — acquire/release logic (mockable with `ContainerManager`)
+优先测试目标：
+1. **语言策略模式检测** — 对每个策略的 `checkDangerousCode()` 编写单元测试
+2. **Shell 输入转义** — `escapeShellInput()` 的边界情况测试
+3. **输出解析** — 时间/内存标记提取测试
+4. **OssUrlParser** — 不同云服务商的 URL 解析测试
+5. **ContainerPool** — 获取/归还逻辑（可 mock `ContainerManager`）
 
 ---
 
-## 8. Example Improved Structure
+## 8. 改进后的结构示例
 
-### 8.1 Proposed Package Structure (Executor Refactoring)
+### 8.1 建议的包结构（执行器重构）
 
 ```
 executor/
-├── DockerCodeExecutor.java          // Orchestration only (~300 LOC)
-├── ContainerManager.java            // Container lifecycle (unchanged)
-├── CommandResult.java               // Execution result DTO (unchanged)
-├── CommandOutputParser.java         // NEW: Parse time/memory markers from output
-├── ShellCommandBuilder.java         // NEW: Build timed shell commands
-├── ExecutionContext.java            // NEW: Encapsulate execution parameters
-└── ResultMapper.java               // NEW: CommandResult → ExecutionResult mapping
+├── DockerCodeExecutor.java          // 仅保留编排逻辑（约 300 行）
+├── ContainerManager.java            // 容器生命周期（不变）
+├── CommandResult.java               // 执行结果 DTO（不变）
+├── CommandOutputParser.java         // 新增：解析输出中的时间/内存标记
+├── ShellCommandBuilder.java         // 新增：构建计时 Shell 命令
+├── ExecutionContext.java            // 新增：封装执行参数
+└── ResultMapper.java               // 新增：CommandResult → ExecutionResult 映射
 ```
 
-### 8.2 Refactored DockerCodeExecutor (Conceptual)
+### 8.2 重构后的 DockerCodeExecutor（概念示例）
 
 ```java
 @Slf4j
@@ -408,10 +408,10 @@ public class DockerCodeExecutor {
     private boolean poolEnabled;
 
     public ExecuteResult execute(ExecutionContext ctx) {
-        // 1. Dangerous code scan
+        // 1. 危险代码扫描
         scanForDangerousCode(ctx);
 
-        // 2. Delegate to appropriate mode
+        // 2. 根据模式委派执行
         return poolEnabled
             ? executeWithPool(ctx)
             : executeTraditional(ctx);
@@ -434,13 +434,13 @@ public class DockerCodeExecutor {
         }
     }
 
-    private CommandResult executeCommand(String containerId, String[] cmd, 
+    private CommandResult executeCommand(String containerId, String[] cmd,
                                           String input, long timeoutMs, String workDir) {
-        // UNIFIED method — workDir can be null for traditional mode
+        // 统一方法 — workDir 为 null 时表示传统模式
         String timedCmd = ShellCommandBuilder.buildTimedCommand(
             String.join(" ", cmd), input, workDir);
-        // ... Docker exec logic ...
-        // ... Parse output using CommandOutputParser ...
+        // ... Docker exec 逻辑 ...
+        // ... 使用 CommandOutputParser 解析输出 ...
     }
 
     private ExecutionResult runSingleTestCase(String containerId, ExecutionContext ctx,
@@ -451,50 +451,50 @@ public class DockerCodeExecutor {
 }
 ```
 
-### 8.3 Before vs After — Line Count Estimate
+### 8.3 重构前后代码行数对比
 
-| Component | Before | After (Estimated) |
+| 组件 | 重构前 | 重构后（预估） |
 |---|---|---|
-| `DockerCodeExecutor` | ~930 LOC | ~350 LOC |
-| `ShellCommandBuilder` | — | ~60 LOC |
-| `CommandOutputParser` | — | ~70 LOC |
-| `ResultMapper` | — | ~40 LOC |
-| `ExecutionContext` | — | ~15 LOC |
-| **Total** | **~930 LOC** | **~535 LOC** |
+| `DockerCodeExecutor` | ~930 行 | ~350 行 |
+| `ShellCommandBuilder` | — | ~60 行 |
+| `CommandOutputParser` | — | ~70 行 |
+| `ResultMapper` | — | ~40 行 |
+| `ExecutionContext` | — | ~15 行 |
+| **合计** | **~930 行** | **~535 行** |
 
-Net reduction of ~395 lines through deduplication and extraction, with improved readability and testability in every extracted component.
-
----
-
-## 9. Summary & Prioritized Action Items
-
-### Critical (Should Fix)
-
-| # | Item | Impact | Effort |
-|---|---|---|---|
-| 1 | Unify `executeCommand()` / `executeCommandInDir()` to eliminate ~160 lines of duplication | High — reduces bug risk | Medium |
-| 2 | Extract `ShellCommandBuilder` from `DockerCodeExecutor` | High — improves readability & testability | Medium |
-| 3 | Extract `CommandOutputParser` from `DockerCodeExecutor` | High — isolates parsing logic | Low |
-| 4 | Unify `runCode()` / `runCodeInTaskDir()` result-mapping logic | High — eliminates ~50 lines of duplication | Low |
-
-### Recommended (Should Plan)
-
-| # | Item | Impact | Effort |
-|---|---|---|---|
-| 5 | Add unit tests for language strategies, output parsing, shell escaping | High — prevents regression | Medium |
-| 6 | Introduce `ExecutionContext` parameter object | Medium — cleaner API | Low |
-| 7 | Remove unused dependencies from `pom.xml` | Medium — reduces artifact size and attack surface | Low |
-| 8 | Replace generic `RuntimeException` with domain-specific exceptions | Medium — better error handling | Low |
-
-### Nice to Have (Low Priority)
-
-| # | Item | Impact | Effort |
-|---|---|---|---|
-| 9 | Fix inconsistent indentation in `ExecutionServiceImpl` | Low — code readability | Low |
-| 10 | Extract hardcoded values (`"sandbox"`, `"/sandbox/workspace"`) to configuration | Low — flexibility | Low |
-| 11 | Add behavior-enriching methods to `PooledContainer` (`markInUse()`, `markIdle()`) | Low — encapsulation | Low |
-| 12 | Evaluate whether Hutool dependency is justified for HTTP-only usage | Low — dependency hygiene | Low |
+通过去重和抽取，净减少约 395 行代码，同时每个抽取的组件都具备更好的可读性和可测试性。
 
 ---
 
-*End of audit report.*
+## 9. 总结与优先级行动项
+
+### 紧急（应立即修复）
+
+| # | 事项 | 影响 | 工作量 |
+|---|---|---|---|
+| 1 | 合并 `executeCommand()` / `executeCommandInDir()` 消除约 160 行重复 | 高 — 降低 Bug 风险 | 中 |
+| 2 | 从 `DockerCodeExecutor` 抽取 `ShellCommandBuilder` | 高 — 提升可读性和可测试性 | 中 |
+| 3 | 从 `DockerCodeExecutor` 抽取 `CommandOutputParser` | 高 — 隔离解析逻辑 | 低 |
+| 4 | 统一 `runCode()` / `runCodeInTaskDir()` 的结果映射逻辑 | 高 — 消除约 50 行重复 | 低 |
+
+### 建议（应纳入计划）
+
+| # | 事项 | 影响 | 工作量 |
+|---|---|---|---|
+| 5 | 为语言策略、输出解析、Shell 转义补充单元测试 | 高 — 防止回归 | 中 |
+| 6 | 引入 `ExecutionContext` 参数对象 | 中 — 更清晰的 API | 低 |
+| 7 | 从 `pom.xml` 移除未使用的依赖 | 中 — 减小构建产物体积和攻击面 | 低 |
+| 8 | 将 `RuntimeException` 替换为领域特定异常 | 中 — 更好的异常处理 | 低 |
+
+### 锦上添花（低优先级）
+
+| # | 事项 | 影响 | 工作量 |
+|---|---|---|---|
+| 9 | 修复 `ExecutionServiceImpl` 中的缩进不一致 | 低 — 代码可读性 | 低 |
+| 10 | 将硬编码值（`"sandbox"`、`"/sandbox/workspace"`）抽取到配置 | 低 — 灵活性 | 低 |
+| 11 | 为 `PooledContainer` 添加行为方法（`markInUse()`、`markIdle()`） | 低 — 封装性 | 低 |
+| 12 | 评估 Hutool 依赖是否值得仅为 HTTP 功能引入 | 低 — 依赖卫生 | 低 |
+
+---
+
+*审计报告结束。*
