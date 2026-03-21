@@ -44,6 +44,10 @@ public class CppLanguageStrategy implements LanguageStrategy {
             Pattern.compile("#include\\s*<dirent\\.h>"),
             Pattern.compile("#include\\s*<sys/stat\\.h>"),
             Pattern.compile("#include\\s*<fcntl\\.h>"),
+            // 连字符绕过 #include（%: 等价于 #，C++11 默认启用）
+            Pattern.compile("%:\\s*include\\s*<dirent\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<sys/stat\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<fcntl\\.h>"),
             // C++ 文件流
             Pattern.compile("\\bstd::ifstream"),
             Pattern.compile("\\bstd::ofstream"),
@@ -62,6 +66,12 @@ public class CppLanguageStrategy implements LanguageStrategy {
             Pattern.compile("#include\\s*<arpa/"),
             Pattern.compile("#include\\s*<sys/ptrace\\.h>"),
             Pattern.compile("#include\\s*<filesystem>"),
+            // 连字符绕过
+            Pattern.compile("%:\\s*include\\s*<sys/socket\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<netinet/"),
+            Pattern.compile("%:\\s*include\\s*<arpa/"),
+            Pattern.compile("%:\\s*include\\s*<sys/ptrace\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<filesystem>"),
             // 危险函数
             Pattern.compile("\\bpopen\\s*\\("),
             Pattern.compile("\\bpclose\\s*\\("),

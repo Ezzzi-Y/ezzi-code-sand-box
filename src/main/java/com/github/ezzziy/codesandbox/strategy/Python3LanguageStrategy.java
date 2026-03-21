@@ -72,7 +72,22 @@ public class Python3LanguageStrategy implements LanguageStrategy {
             Pattern.compile("\\blocals\\s*\\(\\s*\\)"),
             Pattern.compile("\\bvars\\s*\\("),
             Pattern.compile("\\bdir\\s*\\(\\s*\\)"),
-            Pattern.compile("\\bgetattr\\s*\\(.*,\\s*['\"]__"),
+            // getattr/setattr/delattr 全面拦截
+            Pattern.compile("\\bgetattr\\s*\\("),
+            Pattern.compile("\\bsetattr\\s*\\("),
+            Pattern.compile("\\bdelattr\\s*\\("),
+            // type() 元类操作
+            Pattern.compile("\\btype\\s*\\("),
+            // dunder 反射链（封堵 MRO / subclass / globals 等绕过）
+            Pattern.compile("__builtins__"),
+            Pattern.compile("__subclasses__"),
+            Pattern.compile("__globals__"),
+            Pattern.compile("__bases__"),
+            Pattern.compile("__mro__"),
+            Pattern.compile("__class__"),
+            Pattern.compile("__dict__"),
+            Pattern.compile("__loader__"),
+            Pattern.compile("__spec__"),
             // pickle（可执行任意代码）
             Pattern.compile("\\bpickle\\.loads?\\s*\\("),
             Pattern.compile("\\bcPickle\\."),

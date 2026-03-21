@@ -1,6 +1,7 @@
 package com.github.ezzziy.codesandbox.strategy;
 
 import com.github.ezzziy.codesandbox.common.enums.LanguageEnum;
+import com.github.ezzziy.codesandbox.util.JavaUnicodeDecoder;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
@@ -132,6 +133,18 @@ public class Java17LanguageStrategy implements LanguageStrategy {
     @Override
     public List<Pattern> getDangerousPatterns() {
         return DANGEROUS_PATTERNS;
+    }
+
+    @Override
+    public String checkDangerousCode(String code) {
+        // 预处理：解析 Java Unicode 转义，防止绕过黑名单
+        String decodedCode = JavaUnicodeDecoder.decode(code);
+        for (Pattern pattern : getDangerousPatterns()) {
+            if (pattern.matcher(decodedCode).find()) {
+                return pattern.pattern();
+            }
+        }
+        return null;
     }
 
     @Override

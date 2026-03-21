@@ -45,6 +45,10 @@ public class CLanguageStrategy implements LanguageStrategy {
             Pattern.compile("#include\\s*<dirent\\.h>"),
             Pattern.compile("#include\\s*<sys/stat\\.h>"),
             Pattern.compile("#include\\s*<fcntl\\.h>"),
+            // 连字符绕过 #include（%: 等价于 #，C11 默认启用）
+            Pattern.compile("%:\\s*include\\s*<dirent\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<sys/stat\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<fcntl\\.h>"),
             // 网络操作
             Pattern.compile("\\bsocket\\s*\\("),
             Pattern.compile("\\bconnect\\s*\\("),
@@ -60,6 +64,11 @@ public class CLanguageStrategy implements LanguageStrategy {
             Pattern.compile("#include\\s*<netinet/"),
             Pattern.compile("#include\\s*<arpa/"),
             Pattern.compile("#include\\s*<sys/ptrace\\.h>"),
+            // 连字符绕过
+            Pattern.compile("%:\\s*include\\s*<sys/socket\\.h>"),
+            Pattern.compile("%:\\s*include\\s*<netinet/"),
+            Pattern.compile("%:\\s*include\\s*<arpa/"),
+            Pattern.compile("%:\\s*include\\s*<sys/ptrace\\.h>"),
             // 危险函数
             Pattern.compile("\\bpopen\\s*\\("),
             Pattern.compile("\\bpclose\\s*\\("),
