@@ -27,14 +27,31 @@ public class Python3LanguageStrategy implements LanguageStrategy {
             Pattern.compile("\\beval\\s*\\("),
             Pattern.compile("\\bexec\\s*\\("),
             Pattern.compile("\\bcompile\\s*\\("),
-            // 文件操作（危险路径）
-            Pattern.compile("open\\s*\\([^)]*['\"][/~]"),
+            // 文件操作（全面拦截）
+            Pattern.compile("\\bopen\\s*\\("),
             Pattern.compile("\\bos\\.remove\\s*\\("),
             Pattern.compile("\\bos\\.unlink\\s*\\("),
             Pattern.compile("\\bos\\.rmdir\\s*\\("),
             Pattern.compile("\\bshutil\\.rmtree\\s*\\("),
             Pattern.compile("\\bshutil\\.move\\s*\\("),
-            Pattern.compile("\\bpathlib\\.Path.*\\.unlink"),
+            // pathlib（整个模块拦截）
+            Pattern.compile("\\bpathlib\\."),
+            Pattern.compile("from\\s+pathlib"),
+            Pattern.compile("import\\s+pathlib"),
+            // os 文件操作
+            Pattern.compile("\\bos\\.listdir\\s*\\("),
+            Pattern.compile("\\bos\\.scandir\\s*\\("),
+            Pattern.compile("\\bos\\.walk\\s*\\("),
+            Pattern.compile("\\bos\\.path\\."),
+            Pattern.compile("\\bos\\.getcwd"),
+            Pattern.compile("\\bos\\.chdir"),
+            Pattern.compile("\\bos\\.mkdir"),
+            Pattern.compile("\\bos\\.makedirs"),
+            Pattern.compile("\\bos\\.rename\\s*\\("),
+            // io 模块
+            Pattern.compile("\\bio\\.open\\s*\\("),
+            Pattern.compile("import\\s+io\\b"),
+            Pattern.compile("from\\s+io\\s+import"),
             // 网络操作
             Pattern.compile("\\bsocket\\.socket\\s*\\("),
             Pattern.compile("\\burllib\\.request\\."),

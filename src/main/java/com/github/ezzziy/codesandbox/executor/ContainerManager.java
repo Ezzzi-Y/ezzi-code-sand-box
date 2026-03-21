@@ -155,7 +155,6 @@ public class ContainerManager {
      * <p>
      * 目录结构：
      * - /sandbox/workspace/{jobId}/  : 任务工作目录
-     * - /sandbox/inputs/             : 输入数据目录（只读挂载）
      *
      * @param jobId 任务 ID
      * @return 任务工作目录路径（容器内路径）
@@ -240,7 +239,7 @@ public class ContainerManager {
                 // 进程数限制
                 .withPidsLimit((long) executionConfig.getMaxProcesses())
                 // 只读根文件系统
-                .withReadonlyRootfs(false)  // 需要写入代码，所以不能完全只读
+                .withReadonlyRootfs(true)
                 // 删除所有 Linux capabilities
                 .withCapDrop(Capability.ALL)
                 // 安全选项
@@ -253,23 +252,19 @@ public class ContainerManager {
                         new Ulimit("nproc", executionConfig.getMaxProcesses(), executionConfig.getMaxProcesses()),
                         new Ulimit("fsize", executionConfig.getOutputLimit(), executionConfig.getOutputLimit())
                 ))
-                // 临时文件系统
+                // 临时文件系统（只读根文件系统下，仅开放必要写目录）
                 .withTmpFs(java.util.Map.of(
-                        "/tmp", "rw,noexec,nosuid,size=64m"
+                        "/tmp", "rw,noexec,nosuid,size=64m",
+                        "/sandbox/workspace", "rw,nosuid,size=64m"
                 ));
         
-        // 仅传统模式挂载目录，容器池模式不挂载
+        // 仅传统模式挂载工作目录，不再挂载 inputs（统一用 stdin 输入）
         if (workDir != null) {
             hostConfig.withBinds(
-                    new Bind(workDir, new Volume("/sandbox/workspace")),
-                    new Bind("/var/lib/sandbox-inputs", new Volume("/sandbox/inputs"), AccessMode.ro)
-            );
-        } else {
-            // 容器池模式：只挂载输入数据目录（只读）
-            hostConfig.withBinds(
-                    new Bind("/var/lib/sandbox-inputs", new Volume("/sandbox/inputs"), AccessMode.ro)
+                    new Bind(workDir, new Volume("/sandbox/workspace"))
             );
         }
+        // 容器池模式：不挂载任何目录
         
         return hostConfig;
     }

@@ -40,6 +40,22 @@ public class Java17LanguageStrategy implements LanguageStrategy {
             Pattern.compile("Files\\.copy"),
             Pattern.compile("File\\.delete"),
             Pattern.compile("\\.deleteOnExit\\("),
+            // java.nio.file
+            Pattern.compile("import\\s+java\\.nio\\.file\\."),
+            Pattern.compile("Path\\.of\\s*\\("),
+            Pattern.compile("Paths\\.get\\s*\\("),
+            Pattern.compile("Files\\.read"),
+            Pattern.compile("Files\\.list"),
+            Pattern.compile("Files\\.walk"),
+            Pattern.compile("Files\\.lines"),
+            Pattern.compile("Files\\.newInputStream"),
+            Pattern.compile("Files\\.newOutputStream"),
+            Pattern.compile("Files\\.newBufferedReader"),
+            Pattern.compile("Files\\.newBufferedWriter"),
+            // 全限定类名绕过
+            Pattern.compile("java\\.io\\.File[^s]"),
+            // Channel
+            Pattern.compile("FileChannel"),
             // 网络操作
             Pattern.compile("Socket\\s*\\("),
             Pattern.compile("ServerSocket"),

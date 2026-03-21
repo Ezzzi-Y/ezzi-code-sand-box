@@ -74,3 +74,6 @@ sandbox-inputs/
 *.tgz
 *.7z
 *.dump
+/docs/OFFLINE_DEPLOYMENT_GUIDE.md
+/docs/blog.md
+/.claude/settings.local.json

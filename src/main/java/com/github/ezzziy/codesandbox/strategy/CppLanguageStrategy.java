@@ -22,13 +22,32 @@ public class CppLanguageStrategy implements LanguageStrategy {
             Pattern.compile("\\bfork\\s*\\("),
             Pattern.compile("\\bvfork\\s*\\("),
             Pattern.compile("\\bclone\\s*\\("),
-            // 文件操作
-            Pattern.compile("\\bfopen\\s*\\([^)]*[\"'][/~]"),
-            Pattern.compile("\\bopen\\s*\\([^)]*[\"'][/~]"),
+            // 文件操作（全面拦截）
+            Pattern.compile("\\bfopen\\s*\\("),
+            Pattern.compile("\\bopen\\s*\\("),
+            Pattern.compile("\\bfreopen\\s*\\("),
+            Pattern.compile("\\bfdopen\\s*\\("),
+            Pattern.compile("\\bcreat\\s*\\("),
             Pattern.compile("\\bunlink\\s*\\("),
             Pattern.compile("\\bremove\\s*\\("),
             Pattern.compile("\\bstd::filesystem::remove"),
             Pattern.compile("\\bstd::remove\\s*\\("),
+            // 目录操作
+            Pattern.compile("\\bopendir\\s*\\("),
+            Pattern.compile("\\breaddir\\s*\\("),
+            Pattern.compile("\\bscandir\\s*\\("),
+            // 文件信息
+            Pattern.compile("\\bstat\\s*\\("),
+            Pattern.compile("\\blstat\\s*\\("),
+            Pattern.compile("\\baccess\\s*\\("),
+            // 危险头文件
+            Pattern.compile("#include\\s*<dirent\\.h>"),
+            Pattern.compile("#include\\s*<sys/stat\\.h>"),
+            Pattern.compile("#include\\s*<fcntl\\.h>"),
+            // C++ 文件流
+            Pattern.compile("\\bstd::ifstream"),
+            Pattern.compile("\\bstd::ofstream"),
+            Pattern.compile("\\bstd::fstream"),
             // 网络操作
             Pattern.compile("\\bsocket\\s*\\("),
             Pattern.compile("\\bconnect\\s*\\("),
