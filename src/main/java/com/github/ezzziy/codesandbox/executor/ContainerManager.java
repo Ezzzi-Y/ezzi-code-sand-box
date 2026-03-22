@@ -255,7 +255,7 @@ public class ContainerManager {
                 // 临时文件系统（只读根文件系统下，仅开放必要写目录）
                 .withTmpFs(java.util.Map.of(
                         "/tmp", "rw,noexec,nosuid,size=64m",
-                        "/sandbox/workspace", "rw,nosuid,size=64m"
+                        "/sandbox/workspace", "rw,exec,nosuid,size=64m"
                 ));
         
         // 仅传统模式挂载工作目录，不再挂载 inputs（统一用 stdin 输入）
