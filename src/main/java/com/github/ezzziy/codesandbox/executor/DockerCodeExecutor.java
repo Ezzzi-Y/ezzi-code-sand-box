@@ -788,6 +788,11 @@ public class DockerCodeExecutor {
 
     /* ======================= 文件 & 工具 ======================= */
 
+    /**
+     * 容器内工作空间根目录（tmpfs 挂载点）
+     */
+    private static final String WORKSPACE_ROOT = "/sandbox/workspace";
+
     private void writeSourceCodeToContainer(String containerId, String taskDir, String fileName, String code) {
         try {
             // 1. 确保任务目录存在 (使用极简 exec，必须先于 copy 操作)
@@ -796,11 +801,14 @@ public class DockerCodeExecutor {
 
             // 2. 将源码打包成 Tar 流
             // Docker 的 copyArchive API 接收一个 Tar 格式的输入流
+            // 关键：tar 条目路径包含任务子目录前缀（如 job-xxx/main.cpp），
+            // remotePath 指向 tmpfs 挂载点 /sandbox/workspace，
+            // 避免 Docker 守护进程在某些版本下无法解析 tmpfs 上动态创建的子目录路径
+            String jobDirName = taskDir.substring(WORKSPACE_ROOT.length() + 1); // e.g., "job-xxx"
             byte[] codeBytes = code.getBytes(StandardCharsets.UTF_8);
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tos = new TarArchiveOutputStream(bos)) {
-                // 设置 Tar 内的文件名
-                TarArchiveEntry entry = new TarArchiveEntry(fileName);
+                TarArchiveEntry entry = new TarArchiveEntry(jobDirName + "/" + fileName);
                 entry.setSize(codeBytes.length);
                 entry.setMode(0644); // 设置文件权限 -rw-r--r--
 
@@ -810,10 +818,11 @@ public class DockerCodeExecutor {
             }
 
             // 3. 使用 Docker 原生 API 将 Tar 流拷贝进容器
-            // 关键点：withRemotePath(taskDir) 拷贝到该目录下
+            // remotePath 指向 tmpfs 挂载点（Docker 守护进程始终可见），
+            // tar 解压后文件落入 /sandbox/workspace/job-xxx/fileName
             dockerClient.copyArchiveToContainerCmd(containerId)
                     .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .withRemotePath(taskDir)
+                    .withRemotePath(WORKSPACE_ROOT)
                     .exec();
 
             log.debug("源码写入成功: containerId={}, path={}/{}",

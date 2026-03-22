@@ -1,0 +1,105 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # 需要 HEAD~1 做 diff
+
+      - name: Detect sandbox-images changes
+        id: changes
+        run: |
+          if git diff HEAD~1 --name-only -- sandbox-images/ 2>/dev/null | grep -q .; then
+            echo "sandbox_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sandbox_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build code-sandbox image
+        run: |
+          docker build -t code-sandbox:latest .
+
+      - name: Build sandbox runtime images
+        if: steps.changes.outputs.sandbox_changed == 'true'
+        run: |
+          docker compose build sandbox-gcc sandbox-java8 sandbox-java17 sandbox-python
+
+      - name: Export images to tar.gz
+        run: |
+          mkdir -p images
+          docker save code-sandbox:latest | gzip > images/code-sandbox.tar.gz
+
+          if [ "${{ steps.changes.outputs.sandbox_changed }}" = "true" ]; then
+            docker save sandbox-gcc:latest | gzip > images/sandbox-gcc.tar.gz
+            docker save sandbox-java8:latest | gzip > images/sandbox-java8.tar.gz
+            docker save sandbox-java17:latest | gzip > images/sandbox-java17.tar.gz
+            docker save sandbox-python:latest | gzip > images/sandbox-python.tar.gz
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images
+          path: images/
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        server: [SERVER1, SERVER2]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images
+          path: images/
+
+      - name: Resolve server host
+        id: host
+        run: |
+          if [ "${{ matrix.server }}" = "SERVER1" ]; then
+            echo "value=${{ secrets.SERVER1_HOST }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ secrets.SERVER2_HOST }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SCP images to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.host.outputs.value }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: "images/*"
+          target: /opt/ezzi-code-sand-box
+          strip_components: 1
+
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ steps.host.outputs.value }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            cd /opt/ezzi-code-sand-box
+
+            # Load all images
+            for f in *.tar.gz; do
+              [ -f "$f" ] && docker load < "$f"
+            done
+
+            # Restart services
+            docker-compose up -d
+
+            # Cleanup
+            rm -f *.tar.gz
