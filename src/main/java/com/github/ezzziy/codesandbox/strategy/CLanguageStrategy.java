@@ -69,6 +69,8 @@ public class CLanguageStrategy implements LanguageStrategy {
             Pattern.compile("%:\\s*include\\s*<netinet/"),
             Pattern.compile("%:\\s*include\\s*<arpa/"),
             Pattern.compile("%:\\s*include\\s*<sys/ptrace\\.h>"),
+            // 宏 token pasting —— 可拼接出任意危险函数，OJ 场景无正当用途
+            Pattern.compile("##"),
             // 危险函数
             Pattern.compile("\\bpopen\\s*\\("),
             Pattern.compile("\\bpclose\\s*\\("),
