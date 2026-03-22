@@ -138,6 +138,8 @@ public class CLanguageStrategy implements LanguageStrategy {
     public String getExecutableFileName() { return "main"; }
 
     // 危险模式：system(), exec*(), fork(), socket(), 内联汇编, 危险头文件等
+    // 文件操作：fopen, open, unlink, remove, opendir, stat 等
+    // 连字符绕过检测：%:include（C11 digraph，等价于 #include）
 }
 ```
 
@@ -173,6 +175,8 @@ public class CppLanguageStrategy implements LanguageStrategy {
     public String getExecutableFileName() { return "main"; }
 
     // 危险模式：与 C 类似，额外包含 std::thread, std::async, std::filesystem 等
+    // 文件操作：std::ifstream, std::ofstream, std::fstream, std::filesystem::remove 等
+    // 连字符绕过检测：%:include（C++11 digraph）
 }
 ```
 
@@ -212,6 +216,8 @@ public class Java8LanguageStrategy implements LanguageStrategy {
     public int getCompileTimeout() { return 60; }  // Java 编译较慢
 
     // 危险模式：Runtime.exec, ProcessBuilder, 反射, 文件操作, 网络, ClassLoader, JNI, Unsafe 等
+    // 文件操作补全：FileWriter, FileReader, Files.*, Path.of, Paths.get
+    // Unicode 转义预处理：覆盖 checkDangerousCode()，先通过 JavaUnicodeDecoder 解码 \uXXXX
 }
 ```
 
@@ -251,10 +257,11 @@ public class Java17LanguageStrategy implements LanguageStrategy {
     public int getCompileTimeout() { return 60; }
 
     // 危险模式：与 Java 8 相同
+    // Unicode 转义预处理：覆盖 checkDangerousCode()，先通过 JavaUnicodeDecoder 解码 \uXXXX
 }
 ```
 
-> 与 Java 8 的区别：Java 17 使用 `-XX:+UseG1GC`，不设置 `-Djava.security.manager`（Java 17 中 SecurityManager 已弃用）。
+> 与 Java 8 的区别：Java 17 使用 `-XX:+UseG1GC`，不设置 `-Djava.security.manager`（Java 17 中 SecurityManager 已弃用）。两者均覆盖 `checkDangerousCode()` 方法进行 Unicode 转义预处理。
 
 ### 4.5 Python 3 策略
 
@@ -296,6 +303,9 @@ public class Python3LanguageStrategy implements LanguageStrategy {
     }
 
     // 危险模式：os.system, subprocess, eval, exec, socket, ctypes, multiprocessing, pickle 等
+    // 文件操作补全：os.remove, os.unlink, shutil.*, pathlib, os.listdir, os.scandir, os.walk 等
+    // dunder 链拦截：__builtins__, __subclasses__, __globals__, __bases__, __mro__, __class__, __dict__ 等
+    // 反射函数拦截：getattr, setattr, delattr, type()
 }
 ```
 
@@ -305,11 +315,11 @@ public class Python3LanguageStrategy implements LanguageStrategy {
 
 | 语言 | 主要拦截类别 | 典型模式 |
 |------|------------|---------|
-| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件 | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>` |
-| C++ | 同 C + C++ 特有 | `std::thread`, `std::async`, `std::filesystem` |
-| Java 8 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe | `Runtime.getRuntime()`, `Class.forName()`, `System.exit` |
-| Java 17 | 同 Java 8 | 相同危险模式列表 |
-| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle | `os.system()`, `subprocess`, `eval()`, `socket` |
+| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件, **连字符绕过** | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>`, `%:include` |
+| C++ | 同 C + C++ 特有 + **连字符绕过** | `std::thread`, `std::async`, `std::filesystem`, `%:include` |
+| Java 8 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe, **Unicode 转义预处理** | `Runtime.getRuntime()`, `Class.forName()`, `System.exit`, `Files.` |
+| Java 17 | 同 Java 8 + **Unicode 转义预处理** | 相同危险模式列表 |
+| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle, **dunder 链**, **反射函数** | `os.system()`, `subprocess`, `eval()`, `socket`, `__subclasses__`, `getattr` |
 
 > 扫描在 `DockerCodeExecutor` 中调用 `strategy.checkDangerousCode(code)`，仅在 `executionConfig.isEnableCodeScan()` 为 true 时执行。
 

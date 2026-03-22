@@ -34,8 +34,11 @@ private HostConfig buildHostConfig(String workDir) {
             .withPidsLimit((long) executionConfig.getMaxProcesses())
 
             // ============ 文件系统 ============
-            .withReadonlyRootfs(false)             // 非只读（需要写入编译产物）
-            .withTmpFs(Map.of("/tmp", "rw,noexec,nosuid,size=64m"))
+            .withReadonlyRootfs(true)              // 只读根文件系统
+            .withTmpFs(Map.of(
+                    "/tmp", "rw,noexec,nosuid,size=64m",
+                    "/sandbox/workspace", "rw,exec,nosuid,size=64m"
+            ))
 
             // ============ 权限控制 ============
             .withCapDrop(Capability.ALL)           // 删除所有 Linux capabilities
@@ -89,14 +92,14 @@ dockerClient.execCreateCmd(containerId)
 | `withMemorySwap` | 等于 memory | 禁用 swap | 绕过内存限制 |
 | `withPidsLimit` | executionConfig.maxProcesses (1024) | 进程数限制 | fork bomb |
 | `withNetworkDisabled(true)` | true | 完全禁用网络 | 网络攻击、数据泄露 |
-| `withReadonlyRootfs` | **false** | 允许写入 | 需要写入编译产物到工作目录 |
+| `withReadonlyRootfs` | **true** | 只读根文件系统 | 防止容器内篡改系统文件 |
 | `withCapDrop(ALL)` | 删除所有 capabilities | 降权 | 提权攻击 |
 | `no-new-privileges:true` | 防止获取新权限 | 阻止 setuid | setuid 攻击 |
 | `withUser("sandbox")` | uid=1000 | 非 root 运行 | 特权操作 |
-| `withTmpFs` | `/tmp` (64MB, noexec) | 可写临时目录 | 限制临时文件滥用 |
+| `withTmpFs` | `/tmp` (64MB, noexec) + `/sandbox/workspace` (64MB, exec) | 可写临时目录 | 限制临时文件滥用，工作区可执行 |
 | `withUlimits` | nofile/nproc/fsize | 资源上限 | 文件描述符/进程/输出耗尽 |
 
-> 注意：根文件系统设为非只读（`readonlyRootfs(false)`），因为代码编译和运行需要在 `/sandbox/workspace` 下写入文件。安全通过其他层（用户隔离、capability 限制、危险代码扫描）保障。
+> 注意：根文件系统设为只读（`readonlyRootfs(true)`），编译和运行所需的写入通过 tmpfs 挂载实现：`/sandbox/workspace`（可执行，用于编译产物）和 `/tmp`（不可执行，用于临时文件）。tmpfs 在容器销毁后自动清空，不会残留数据。
 
 ---
 
@@ -144,7 +147,7 @@ RUN groupadd -g 1000 sandbox && \
 ```
 / (root owned)
 ├── sandbox/
-│   └── workspace/     (sandbox:sandbox, rw)
+│   └── workspace/     (tmpfs, sandbox:sandbox, rw, exec, 64MB)
 │       └── job-{id}/  (sandbox:sandbox, rw) ← 用户代码在此执行
 ├── tmp/               (tmpfs, 64MB, noexec)
 └── sandbox/inputs/    (readonly bind mount)
@@ -195,10 +198,10 @@ if (executionConfig.isEnableCodeScan()) {
 
 | 语言 | 拦截类别 | 典型模式 | 模式数量 |
 |------|---------|---------|---------|
-| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件, mmap | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>`, `ptrace()` | ~30 |
-| C++ | 同 C + C++ 特有 | `std::thread`, `std::async`, `std::future`, `std::filesystem` | ~30 |
-| Java 8/17 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe | `Runtime.getRuntime()`, `Class.forName()`, `System.exit`, `Thread.sleep` | ~35 |
-| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle | `os.system()`, `subprocess`, `eval()`, `socket`, `__import__()` | ~35 |
+| C | 系统调用, 文件, 网络, 内联汇编, 危险头文件, mmap, **连字符绕过** | `system()`, `fork()`, `socket()`, `asm`, `#include <sys/socket.h>`, `ptrace()`, `%:include` | ~35 |
+| C++ | 同 C + C++ 特有 + **连字符绕过** | `std::thread`, `std::async`, `std::future`, `std::filesystem`, `%:include` | ~40 |
+| Java 8/17 | Runtime, 反射, 文件, 网络, ClassLoader, JNI, Unsafe, **Unicode 转义预处理** | `Runtime.getRuntime()`, `Class.forName()`, `System.exit`, `Thread.sleep` | ~40 |
+| Python | 系统命令, eval/exec, 文件, 网络, ctypes, pickle, **dunder 链拦截** | `os.system()`, `subprocess`, `eval()`, `socket`, `__subclasses__`, `getattr` | ~50 |
 
 ### 5.4 C/C++ 危险模式详情
 
@@ -214,6 +217,14 @@ Pattern.compile("#include\\s*<sys/socket\\.h>"),  // 网络头文件
 Pattern.compile("\\bptrace\\s*\\("),       // 进程追踪
 Pattern.compile("\\bmmap\\s*\\("),         // 内存映射
 Pattern.compile("\\bdlopen\\s*\\("),       // 动态库加载
+// 文件操作补全
+Pattern.compile("\\bfopen\\s*\\("),        // 文件打开
+Pattern.compile("\\bopen\\s*\\("),         // 低级文件打开
+Pattern.compile("\\bunlink\\s*\\("),       // 文件删除
+Pattern.compile("\\bremove\\s*\\("),       // 文件/目录删除
+Pattern.compile("\\bopendir\\s*\\("),      // 目录操作
+// C11 连字符（digraph）绕过检测
+Pattern.compile("%:\\s*include"),           // %:include 等价于 #include
 ```
 
 ### 5.5 Java 危险模式详情
@@ -230,7 +241,15 @@ Pattern.compile("System\\.loadLibrary"),         // JNI 加载
 Pattern.compile("sun\\.misc\\.Unsafe"),          // Unsafe 操作
 Pattern.compile("import\\s+java\\.net\\."),      // 网络类导入
 Pattern.compile("ClassLoader"),                  // 类加载器
+// 文件操作补全
+Pattern.compile("\\bFileWriter\\b"),             // 文件写入
+Pattern.compile("\\bFileReader\\b"),             // 文件读取
+Pattern.compile("\\bFiles\\."),                  // NIO Files 工具类
+Pattern.compile("\\bPath\\.of\\b"),              // NIO Path
+Pattern.compile("\\bPaths\\.get\\b"),            // NIO Paths
 ```
+
+> **Java Unicode 转义预处理**：Java 8/17 策略覆盖了 `checkDangerousCode()` 方法，在正则匹配前先通过 `JavaUnicodeDecoder.decode()` 将 `\uXXXX` 形式的 Unicode 转义还原为实际字符，防止攻击者用 `\u0052untime` 等方式绕过黑名单。
 
 ### 5.6 Python 危险模式详情
 
@@ -245,6 +264,26 @@ Pattern.compile("import\\s+ctypes"),             // C 类型接口
 Pattern.compile("import\\s+multiprocessing"),    // 多进程
 Pattern.compile("\\bpickle\\.loads?\\s*\\("),    // pickle 反序列化
 Pattern.compile("\\b__import__\\s*\\("),         // 动态导入
+// 文件操作补全
+Pattern.compile("\\bos\\.remove\\s*\\("),        // 文件删除
+Pattern.compile("\\bos\\.unlink\\s*\\("),        // 文件删除
+Pattern.compile("\\bshutil\\."),                 // 高级文件操作
+Pattern.compile("import\\s+pathlib"),            // pathlib 模块
+// dunder 链拦截
+Pattern.compile("__builtins__"),                 // 内建函数访问
+Pattern.compile("__subclasses__"),               // 子类链遍历
+Pattern.compile("__globals__"),                  // 全局变量访问
+Pattern.compile("__bases__"),                    // 基类链遍历
+Pattern.compile("__mro__"),                      // MRO 链遍历
+Pattern.compile("__class__"),                    // 类属性访问
+Pattern.compile("__dict__"),                     // 字典属性访问
+Pattern.compile("__loader__"),                   // 加载器访问
+Pattern.compile("__spec__"),                     // 模块规范访问
+// 反射函数
+Pattern.compile("\\bgetattr\\s*\\("),            // 动态属性获取
+Pattern.compile("\\bsetattr\\s*\\("),            // 动态属性设置
+Pattern.compile("\\bdelattr\\s*\\("),            // 动态属性删除
+Pattern.compile("\\btype\\s*\\("),               // 元类操作
 ```
 
 ---
@@ -311,16 +350,23 @@ echo '__EXEC_MEM_KB__:'$MEM
 - [x] `--memory` + `--memory-swap` — 内存限制 + 禁用 swap
 - [x] `--pids-limit` — 进程数限制（防 fork bomb）
 - [x] ulimits (nofile, nproc, fsize) — 资源上限
+- [x] `readonlyRootfs(true)` — 只读根文件系统
 - [x] tmpfs `/tmp` (noexec, 64MB) — 可写但不可执行的临时目录
+- [x] tmpfs `/sandbox/workspace` (exec, 64MB) — 可写可执行的工作目录
 - [x] `sandbox` 用户 (uid=1000) — 非 root 执行
 - [x] 各语言危险代码正则扫描（可通过 `enableCodeScan` 开关）
+- [x] Java Unicode 转义预处理（防 `\uXXXX` 绕过黑名单）
+- [x] C/C++ 连字符检测（防 `%:include` 绕过 `#include` 黑名单）
+- [x] Python dunder 链拦截（防 `__subclasses__`/`__globals__` 等反射链攻击）
 - [x] Docker 默认 seccomp 配置
 - [x] `DangerousCodeException` 异常处理
 - [x] 只读输入数据挂载（`/sandbox/inputs` 以 `AccessMode.ro` 挂载）
+- [x] 源代码通过 exec + base64 写入容器（适配只读根文件系统）
 
 ### 8.2 注意事项
 
-- `readonlyRootfs` 设为 `false`，因为编译和运行需要写入 `/sandbox/workspace`
+- `readonlyRootfs` 设为 `true`，写入需求通过 tmpfs 挂载实现（`/sandbox/workspace` 和 `/tmp`）
+- 源代码通过 `exec + base64` 方式写入容器（Docker archive API 被只读根文件系统阻止）
 - Docker 默认 seccomp 已禁止约 44 个危险系统调用（reboot, mount, module 等）
 - 项目中无独立的 `SecurityConfigBuilder`、`SecurityAuditLogger`、`PathValidator` 类
 - 无自定义 seccomp profile 文件，依赖 Docker 默认

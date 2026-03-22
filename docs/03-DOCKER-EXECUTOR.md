@@ -171,7 +171,7 @@ private HostConfig buildHostConfig(String workDir) {
             .withCpuPeriod(cpuPeriod)
             .withCpuQuota(cpuQuota)
             .withPidsLimit((long) executionConfig.getMaxProcesses())
-            .withReadonlyRootfs(false)
+            .withReadonlyRootfs(true)
             .withCapDrop(Capability.ALL)
             .withSecurityOpts(List.of("no-new-privileges:true"))
             .withUlimits(List.of(
@@ -179,7 +179,10 @@ private HostConfig buildHostConfig(String workDir) {
                     new Ulimit("nproc", maxProcesses, maxProcesses),
                     new Ulimit("fsize", outputLimit, outputLimit)
             ))
-            .withTmpFs(Map.of("/tmp", "rw,noexec,nosuid,size=64m"));
+            .withTmpFs(Map.of(
+                    "/tmp", "rw,noexec,nosuid,size=64m",
+                    "/sandbox/workspace", "rw,exec,nosuid,size=64m"
+            ));
 
     // 挂载卷
     if (workDir != null) {
@@ -368,19 +371,26 @@ private ExecutionResult runCodeInTaskDir(String containerId, LanguageStrategy st
 
 ### 5.5 文件写入
 
-源代码通过 tar 归档方式写入容器：
+源代码通过 exec + base64 编码方式写入容器（Docker archive API 被 `readonlyRootfs(true)` 阻止）：
 
 ```java
 private void writeSourceCodeToContainer(String containerId, String taskDir,
                                          String fileName, String code) {
     ensureTaskDirExists(containerId, taskDir);  // mkdir -p
-    // 创建 tar 归档 → copyArchiveToContainerCmd
-    dockerClient.copyArchiveToContainerCmd(containerId)
-            .withTarInputStream(tarStream)
-            .withRemotePath(taskDir)
+    // 将代码 Base64 编码后通过 exec 写入
+    String base64Code = Base64.getEncoder().encodeToString(code.getBytes(StandardCharsets.UTF_8));
+    String filePath = taskDir + "/" + fileName;
+    String[] cmd = {"sh", "-c",
+            "echo '" + base64Code + "' | base64 -d > " + filePath};
+    // 通过 docker exec 在容器内执行写入
+    dockerClient.execCreateCmd(containerId)
+            .withUser("sandbox")
+            .withCmd(cmd)
             .exec();
 }
 ```
+
+> 设计说明：由于启用了 `readonlyRootfs(true)`，Docker 的 `copyArchiveToContainerCmd`（tar 归档写入）无法写入容器内的只读路径。改为通过 exec 在容器内执行 base64 解码写入 tmpfs 挂载的 `/sandbox/workspace`，绕过此限制。
 
 ---
 
@@ -391,7 +401,7 @@ private void writeSourceCodeToContainer(String containerId, String taskDir,
 ```
 1. 从容器池获取容器 (acquireContainer)
 2. 创建任务目录 (mkdir -p /sandbox/workspace/job-{requestId})
-3. 写入源代码 (tar copy)
+3. 写入源代码 (exec + base64)
 4. 编译（如需编译）
 5. 逐个运行测试用例
 6. 清理任务目录 (rm -rf)
