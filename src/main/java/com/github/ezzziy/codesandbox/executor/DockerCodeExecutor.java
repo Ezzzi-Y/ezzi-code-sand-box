@@ -114,7 +114,7 @@ public class DockerCodeExecutor {
                 if (!compileResult.isSuccess()) {
                     log.error("编译失败: requestId={}, time={}ms, exitCode={}, stderr={}",
                             requestId, compileResult.getExecutionTime(), compileResult.getExitCode(), compileResult.getStderr());
-                    throw new CompileException(compileResult.getStderr(), requestId);
+                    throw new CompileException(sanitizeInternalPath(compileResult.getStderr()), requestId);
                 }
                 log.info("编译成功: requestId={}, time={}ms, output={}",
                         requestId, compileResult.getExecutionTime(),
@@ -205,7 +205,7 @@ public class DockerCodeExecutor {
                 if (!compileResult.isSuccess()) {
                     log.error("编译失败: requestId={}, time={}ms, exitCode={}, stderr={}",
                             requestId, compileResult.getExecutionTime(), compileResult.getExitCode(), compileResult.getStderr());
-                    throw new CompileException(compileResult.getStderr(), requestId);
+                    throw new CompileException(sanitizeInternalPath(compileResult.getStderr()), requestId);
                 }
                 log.info("编译成功: requestId={}, time={}ms, output={}",
                         requestId, compileResult.getExecutionTime(),
@@ -508,7 +508,7 @@ public class DockerCodeExecutor {
             return ExecutionResult.runtimeError(
                     index,
                     normalizeOutput(result.getStdout()),
-                    result.getStderr(),
+                    sanitizeInternalPath(result.getStderr()),
                     executionTime,
                     result.getMemoryUsage(),
                     result.getExitCode()
@@ -519,7 +519,7 @@ public class DockerCodeExecutor {
         return ExecutionResult.success(
                 index,
                 normalizeOutput(result.getStdout()),
-                result.getStderr(),
+                sanitizeInternalPath(result.getStderr()),
                 executionTime,
                 result.getMemoryUsage()
         );
@@ -764,7 +764,7 @@ public class DockerCodeExecutor {
             return ExecutionResult.runtimeError(
                     index,
                     normalizeOutput(result.getStdout()),
-                    result.getStderr(),
+                    sanitizeInternalPath(result.getStderr()),
                     executionTime,
                     result.getMemoryUsage(),
                     result.getExitCode()
@@ -775,7 +775,7 @@ public class DockerCodeExecutor {
         return ExecutionResult.success(
                 index,
                 normalizeOutput(result.getStdout()),
-                result.getStderr(),
+                sanitizeInternalPath(result.getStderr()),
                 executionTime,
                 result.getMemoryUsage()
         );
@@ -871,14 +871,14 @@ public class DockerCodeExecutor {
             if (!sb.isEmpty()) sb.append("\n");
             sb.append(result.getStderr().trim());
         }
-        return sb.isEmpty() ? null : sb.toString();
+        return sb.isEmpty() ? null : sanitizeInternalPath(sb.toString());
     }
 
     private String normalizeOutput(String output) {
         if (output == null) return "";
-        return output.trim()
+        return sanitizeInternalPath(output.trim()
                 .replace("\r\n", "\n")
-                .replace("\r", "\n");
+                .replace("\r", "\n"));
     }
 
     /**
@@ -890,5 +890,17 @@ public class DockerCodeExecutor {
         // 在单引号字符串中，单引号需要特殊处理：'text'\''more'
         // 即：结束当前单引号，添加转义的单引号，再开始新的单引号
         return input.replace("'", "'\\''");
+    }
+
+    /**
+     * 清理容器内部路径，防止信息泄露
+     * 将 /sandbox/workspace/job-xxx/Main.java → Main.java
+     * 将 /sandbox/workspace/Main.java → Main.java
+     */
+    private String sanitizeInternalPath(String output) {
+        if (output == null) return null;
+        return output
+                .replaceAll("/sandbox/workspace/job-[a-f0-9\\-]+/", "")
+                .replace("/sandbox/workspace/", "");
     }
 }
