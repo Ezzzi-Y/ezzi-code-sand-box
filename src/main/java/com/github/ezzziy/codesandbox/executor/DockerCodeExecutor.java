@@ -13,19 +13,17 @@ import com.github.ezzziy.codesandbox.pool.PooledContainer;
 import com.github.ezzziy.codesandbox.strategy.LanguageStrategy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.io.FileUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -788,86 +786,44 @@ public class DockerCodeExecutor {
 
     /* ======================= 文件 & 工具 ======================= */
 
-    /**
-     * 容器内工作空间根目录（tmpfs 挂载点）
-     */
-    private static final String WORKSPACE_ROOT = "/sandbox/workspace";
-
     private void writeSourceCodeToContainer(String containerId, String taskDir, String fileName, String code) {
         try {
-            // 1. 确保任务目录存在 (使用极简 exec，必须先于 copy 操作)
-            // 注意：taskDir 必须是绝对路径，例如 /sandbox/workspace/job-123
-            ensureTaskDirExists(containerId, taskDir);
-
-            // 2. 将源码打包成 Tar 流
-            // Docker 的 copyArchive API 接收一个 Tar 格式的输入流
-            // 关键：tar 条目路径包含任务子目录前缀（如 job-xxx/main.cpp），
-            // remotePath 指向 tmpfs 挂载点 /sandbox/workspace，
-            // 避免 Docker 守护进程在某些版本下无法解析 tmpfs 上动态创建的子目录路径
-            String jobDirName = taskDir.substring(WORKSPACE_ROOT.length() + 1); // e.g., "job-xxx"
+            // 通过 exec 在容器内部完成 mkdir + 写文件，绕过 readonlyRootfs 对 Docker archive API 的限制
+            // tmpfs 从容器内部视角可写，exec 在容器内执行，因此不受 readonlyRootfs 影响
             byte[] codeBytes = code.getBytes(StandardCharsets.UTF_8);
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tos = new TarArchiveOutputStream(bos)) {
-                TarArchiveEntry entry = new TarArchiveEntry(jobDirName + "/" + fileName);
-                entry.setSize(codeBytes.length);
-                entry.setMode(0644); // 设置文件权限 -rw-r--r--
+            String base64Code = Base64.getEncoder().encodeToString(codeBytes);
+            String filePath = taskDir + "/" + fileName;
 
-                tos.putArchiveEntry(entry);
-                tos.write(codeBytes);
-                tos.closeArchiveEntry();
-            }
+            // 合并 mkdir 和写文件为 1 次 exec 调用
+            String writeCmd = "mkdir -p " + taskDir + " && echo '" + base64Code + "' | base64 -d > " + filePath;
 
-            // 3. 使用 Docker 原生 API 将 Tar 流拷贝进容器
-            // remotePath 指向 tmpfs 挂载点（Docker 守护进程始终可见），
-            // tar 解压后文件落入 /sandbox/workspace/job-xxx/fileName
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
-                    .withRemotePath(WORKSPACE_ROOT)
+            ExecCreateCmdResponse execCreate = dockerClient.execCreateCmd(containerId)
+                    .withUser("sandbox")
+                    .withCmd("sh", "-c", writeCmd)
+                    .withAttachStdout(true)
+                    .withAttachStderr(true)
                     .exec();
 
-            log.debug("源码写入成功: containerId={}, path={}/{}",
-                    containerId.substring(0, 12), taskDir, fileName);
+            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+            dockerClient.execStartCmd(execCreate.getId())
+                    .exec(new ExecStartResultCallback(stdout, stderr))
+                    .awaitCompletion(10, TimeUnit.SECONDS);
 
+            InspectExecResponse inspect = dockerClient.inspectExecCmd(execCreate.getId()).exec();
+            if (inspect.getExitCodeLong() != null && inspect.getExitCodeLong() != 0) {
+                throw new RuntimeException("写入文件失败: exitCode=" + inspect.getExitCodeLong()
+                        + ", stderr=" + stderr.toString(StandardCharsets.UTF_8));
+            }
+
+            log.debug("源码写入成功: containerId={}, path={}", containerId.substring(0, 12), filePath);
+
+        } catch (RuntimeException e) {
+            throw e;
         } catch (Exception e) {
             log.error("写入源码到容器发生致命异常: containerId={}, taskDir={}, error={}",
                     containerId, taskDir, e.getMessage());
             throw new RuntimeException("写入源码到容器失败", e);
-        }
-    }
-    private void ensureTaskDirExists(String containerId, String taskDir) {
-        try {
-            // 使用 sandbox 用户创建任务目录
-            // workspace 目录权限是 1777，sandbox 用户可以直接创建子目录
-            String execId = dockerClient.execCreateCmd(containerId)
-                    .withUser("sandbox")
-                    .withCmd("mkdir", "-p", taskDir)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec().getId();
-
-            ByteArrayOutputStream stdout = new ByteArrayOutputStream();
-            ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-            dockerClient.execStartCmd(execId)
-                    .exec(new ExecStartResultCallback(stdout, stderr))
-                    .awaitCompletion(5, TimeUnit.SECONDS);
-
-            // 检查 mkdir 执行结果
-            InspectExecResponse inspectMkdir = dockerClient.inspectExecCmd(execId).exec();
-            if (inspectMkdir.getExitCodeLong() != null && inspectMkdir.getExitCodeLong() != 0) {
-                throw new RuntimeException("mkdir 失败: exitCode=" + inspectMkdir.getExitCodeLong() 
-                        + ", stderr=" + stderr.toString());
-            }
-
-            log.debug("任务目录创建成功: containerId={}, taskDir={}", 
-                    containerId.substring(0, 12), taskDir);
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("创建任务目录被中断", e);
-        } catch (Exception e) {
-            log.error("创建任务目录失败: containerId={}, taskDir={}, error={}", 
-                    containerId.substring(0, 12), taskDir, e.getMessage());
-            throw new RuntimeException("创建任务目录失败: " + e.getMessage(), e);
         }
     }
 
