@@ -51,7 +51,7 @@ sandbox:
     # CPU 限制（核心数）
     cpu-limit: 1.0
     # 输出大小限制（字节）
-    output-limit: 65536
+    output-limit: 262144
     # 最大进程数（容器池模式需要足够大以支持多次 exec）
     max-processes: 1024
     # 最大打开文件数

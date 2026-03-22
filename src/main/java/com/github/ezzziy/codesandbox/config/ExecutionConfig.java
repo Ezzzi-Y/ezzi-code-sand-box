@@ -45,7 +45,7 @@ public class ExecutionConfig {
     /**
      * 输出大小限制（字节）
      */
-    private int outputLimit = 65536;
+    private int outputLimit = 262144;
 
     /**
      * 最大进程数（容器池模式需要足够大以支持多次 exec）
